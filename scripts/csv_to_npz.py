@@ -63,7 +63,8 @@ class MotionLoader:
     self.motion_base_rots_input = self.motion_base_rots_input[
       :, [3, 0, 1, 2]
     ]  # convert to wxyz
-    self.motion_dof_poss_input = motion[:, 7:]
+    self.motion_dof_poss_input = motion[:, 7:-2]
+    self.motion_contact_input = motion[:, -2:]
 
     self.input_frames = motion.shape[0]
     self.duration = (self.input_frames - 1) * self.input_dt
@@ -90,6 +91,9 @@ class MotionLoader:
       self.motion_dof_poss_input[index_1],
       blend.unsqueeze(1),
     )
+    self.motion_contacts = (
+      self.motion_contact_input[index_0]
+    ).clone()
     print(
       f"Motion interpolated, input frames: {self.input_frames}, "
       f"input fps: {self.input_fps}, "
@@ -173,6 +177,7 @@ class MotionLoader:
       self.motion_base_ang_vels[self.current_idx : self.current_idx + 1],
       self.motion_dof_poss[self.current_idx : self.current_idx + 1],
       self.motion_dof_vels[self.current_idx : self.current_idx + 1],
+      self.motion_contacts[self.current_idx:self.current_idx+1],
     )
     self.current_idx += 1
     reset_flag = False
@@ -213,6 +218,7 @@ def run_sim(
     "body_quat_w": [],
     "body_lin_vel_w": [],
     "body_ang_vel_w": [],
+    "foot_contact": [],
   }
   file_saved = False
 
@@ -242,6 +248,7 @@ def run_sim(
         motion_base_ang_vel,
         motion_dof_pos,
         motion_dof_vel,
+        motion_contact,
       ),
       reset_flag,
     ) = motion.get_next_state()
@@ -277,6 +284,9 @@ def run_sim(
       log["body_ang_vel_w"].append(
         robot.data.body_link_ang_vel_w[0, :].cpu().numpy().copy()
       )
+      log["foot_contact"].append(
+        motion_contact[0].cpu().numpy().copy()
+      )
 
       torch.testing.assert_close(
         robot.data.body_link_lin_vel_w[0, 0], motion_base_lin_vel[0]
@@ -304,6 +314,7 @@ def run_sim(
           "body_quat_w",
           "body_lin_vel_w",
           "body_ang_vel_w",
+          "foot_contact",
         ):
           log[k] = np.stack(log[k], axis=0)
         np.savez(output_path, **log)  # type: ignore[arg-type]

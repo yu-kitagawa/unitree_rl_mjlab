@@ -48,6 +48,9 @@ class MotionLoader:
     self._body_ang_vel_w = torch.tensor(
       data["body_ang_vel_w"], dtype=torch.float32, device=device
     )
+    self.foot_contact = torch.tensor(
+      data["foot_contact"], dtype=torch.float32, device=device
+    )
     self._body_indexes = body_indexes
     self.body_pos_w = self._body_pos_w[:, self._body_indexes]
     self.body_quat_w = self._body_quat_w[:, self._body_indexes]
@@ -148,6 +151,10 @@ class MotionCommand(CommandTerm):
   @property
   def body_ang_vel_w(self) -> torch.Tensor:
     return self.motion.body_ang_vel_w[self.time_steps]
+
+  @property
+  def foot_contact(self) -> torch.Tensor:
+    return self.motion.foot_contact[self.time_steps]
 
   @property
   def anchor_pos_w(self) -> torch.Tensor:

@@ -12,3 +12,8 @@ deploy/robots/r1/build
 deploy/robots/a2/build
 src/assets/motions/g1/dance1_subject2.npz
 simulate/build
+*__pycache__
+src/assets/motions/g1/ref.csv
+src/assets/motions/g1/ref.npz
+src/assets/motions/g1/ref2.csv
+src/assets/motions/g1/ref2.npz

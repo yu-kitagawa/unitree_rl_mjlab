@@ -8,7 +8,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
-from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from src.tasks.tracking.mdp import MotionCommandCfg
 
 from src.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 
@@ -22,6 +22,19 @@ def unitree_g1_flat_tracking_env_cfg(
 
   cfg.scene.entities = {"robot": get_g1_robot_cfg()}
 
+  feet_ground_cfg = ContactSensorCfg(
+    name="feet_ground_contact",
+    primary=ContactMatch(
+      mode="subtree",
+      pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="body", pattern="terrain"),
+    fields=("found", "force"),
+    reduce="netforce",
+    num_slots=1,
+    track_air_time=True,
+  )
   self_collision_cfg = ContactSensorCfg(
     name="self_collision",
     primary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
@@ -31,7 +44,7 @@ def unitree_g1_flat_tracking_env_cfg(
     num_slots=1,
     history_length=4,
   )
-  cfg.scene.sensors = (self_collision_cfg,)
+  cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg,)
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)

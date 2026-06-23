@@ -22,7 +22,7 @@ from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.tracking import mdp
-from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from src.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
@@ -221,13 +221,13 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "motion_body_pos": RewardTermCfg(
       func=mdp.motion_relative_body_position_error_exp,
-      weight=1.0,
-      params={"command_name": "motion", "std": 0.3},
+      weight=3.0,
+      params={"command_name": "motion", "std": 0.15},
     ),
     "motion_body_ori": RewardTermCfg(
       func=mdp.motion_relative_body_orientation_error_exp,
-      weight=1.0,
-      params={"command_name": "motion", "std": 0.4},
+      weight=2.0,
+      params={"command_name": "motion", "std": 0.2},
     ),
     "motion_body_lin_vel": RewardTermCfg(
       func=mdp.motion_global_body_linear_velocity_error_exp,
@@ -238,6 +238,26 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.motion_global_body_angular_velocity_error_exp,
       weight=1.0,
       params={"command_name": "motion", "std": 3.14},
+    ),
+    "feet_clearance": RewardTermCfg(
+      func=mdp.feet_clearance,
+      weight=0.4,
+      params={"command_name": "motion", "std": 0.04},
+    ),
+    "foot_slip": RewardTermCfg(
+      func=mdp.foot_slip_penalty,
+      weight=0.4,
+      params={"command_name": "motion"},
+    ),
+    "feet_gait": RewardTermCfg(
+      func=mdp.foot_contact_reward,
+      weight=0.4,
+      params={"command_name": "motion"},
+    ),
+    "soft_landing": RewardTermCfg(
+      func=mdp.soft_landing,
+      weight=1e-3,
+      params={"command_name": "motion"},
     ),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-1),
     "joint_limit": RewardTermCfg(

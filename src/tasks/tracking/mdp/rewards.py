@@ -113,6 +113,130 @@ def motion_global_body_angular_velocity_error_exp(
   return torch.exp(-error.mean(-1) / std**2)
 
 
+def feet_clearance(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  std: float,
+) -> torch.Tensor:
+
+  command = cast(
+    MotionCommand,
+    env.command_manager.get_term(command_name),
+  )
+
+  foot_names = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+  )
+
+  body_indexes = _get_body_indexes(
+    command,
+    foot_names,
+  )
+
+  foot_vel = (
+    command.robot_body_lin_vel_w[:, body_indexes, :2]
+  )
+
+  foot_height = command.robot_body_pos_w[:, body_indexes, 2]
+  horizontal_speed = torch.norm(
+    foot_vel, dim=-1
+  )
+
+  swing_mask = horizontal_speed > 0.15
+
+  error = (
+    foot_height
+    - command.motion.body_pos_w[:, body_indexes, 2].max()
+  ) ** 2
+
+  reward = torch.exp(
+    -error / (std**2)
+  )
+
+  reward *= swing_mask.float()
+
+  return reward.mean(dim=1)
+
+
+def foot_slip_penalty(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+) -> torch.Tensor:
+
+  command = cast(
+    MotionCommand,
+    env.command_manager.get_term(command_name),
+  )
+
+  foot_names = (
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+  )
+
+  body_indexes = _get_body_indexes(
+    command,
+    foot_names,
+  )
+
+  foot_vel = (
+    command.robot_body_lin_vel_w[:, body_indexes, :2]
+  )
+
+  slip = torch.norm(
+    foot_vel,
+    dim=-1,
+  )
+
+  contact = command.foot_contact.float()
+
+  return (slip * contact).mean(-1)
+
+
+def foot_contact_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+) -> torch.Tensor:
+
+    command = cast(
+        MotionCommand,
+        env.command_manager.get_term(command_name),
+    )
+
+    sensor = env.scene.sensors[
+        "feet_ground_contact"
+    ]
+
+    actual_contact = (
+        sensor.data.found > 0
+    )
+
+    ref_contact = (
+        command.foot_contact > 0
+    )
+
+    match = (
+        actual_contact == ref_contact
+    ).float()
+
+    return match.mean(dim=-1)
+
+
+def soft_landing(
+  env: ManagerBasedRlEnv,
+  command_name: str | None = None,
+) -> torch.Tensor:
+  """Penalize high impact forces at landing to encourage soft footfalls."""
+  contact_sensor: ContactSensor = env.scene["feet_ground_contact"]
+  sensor_data = contact_sensor.data
+  assert sensor_data.force is not None
+  forces = sensor_data.force  # [B, N, 3]
+  force_magnitude = torch.norm(forces, dim=-1)  # [B, N]
+  first_contact = contact_sensor.compute_first_contact(dt=env.step_dt)  # [B, N]
+  landing_impact = force_magnitude * first_contact.float()  # [B, N]
+  return torch.sum(landing_impact, dim=1)
+
+
 def self_collision_cost(
   env: ManagerBasedRlEnv,
   sensor_name: str,
