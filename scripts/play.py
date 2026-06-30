@@ -73,7 +73,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     # Check for local motion file first (works for both dummy and trained modes).
     if cfg.motion_file is not None and Path(cfg.motion_file).exists():
       print(f"[INFO]: Using local motion file: {cfg.motion_file}")
-      motion_cmd.motion_file = cfg.motion_file
+      motion_cmd.motion_files = [cfg.motion_file]
     elif DUMMY_MODE:
       if not cfg.registry_name:
         raise ValueError(

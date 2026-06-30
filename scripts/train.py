@@ -24,7 +24,7 @@ from mjlab.utils.wrappers import VideoRecorder
 class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
-  motion_file: str | None = None
+  motion_files: str | None = None
   video: bool = False
   video_length: int = 200
   video_interval: int = 2000
@@ -67,19 +67,20 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   )
 
   if is_tracking_task:
-    if not cfg.motion_file:
+    if not cfg.motion_files:
       raise ValueError("For tracking tasks, --motion-file must be set ...")
-    motion_path = Path(cfg.motion_file).expanduser().resolve()
-    if not motion_path.exists():
-      raise FileNotFoundError(f"Motion file not found: {motion_path}")
+    motion_paths = [Path(file).expanduser().resolve() for file in Path(cfg.motion_files).glob("*.npz")]
+    for path in motion_paths:
+      if not path.exists():
+        raise FileNotFoundError(f"Motion file not found: {path}")
     motion_cmd = cfg.env.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
-    motion_cmd.motion_file = str(motion_path)
-    print(f"[INFO] Using motion file: {motion_cmd.motion_file}")
+    motion_cmd.motion_files = [str(path) for path in motion_paths]
+    print(f"[INFO] Using motion file: {motion_cmd.motion_files}")
 
     # Check if motion_file is already set (e.g., via CLI --env.commands.motion.motion-file).
-    if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
-      print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
+    if motion_cmd.motion_files and all(Path(file).exists() for file in motion_cmd.motion_files):
+      print(f"[INFO] Using local motion file: {motion_cmd.motion_files}")
 
   # Enable NaN guard if requested.
   if cfg.enable_nan_guard:

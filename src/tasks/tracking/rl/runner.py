@@ -63,7 +63,7 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
   ) -> None:
     os.makedirs(path, exist_ok=True)
     cmd = cast(MotionCommand, self.env.unwrapped.command_manager.get_term("motion"))
-    model = _OnnxMotionModel(self.alg.get_policy(), cmd.motion)
+    model = _OnnxMotionModel(self.alg.get_policy(), cmd.motions[0])
     model.to("cpu")
     model.eval()
     obs = torch.zeros(1, model.policy.input_size)

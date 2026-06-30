@@ -79,6 +79,10 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.joint_vel_rel, noise=Unoise(n_min=-0.5, n_max=0.5)
     ),
     "actions": ObservationTermCfg(func=mdp.last_action),
+    "motion_phase": ObservationTermCfg(
+      func=mdp.motion_phase,
+      params={"command_name": "motion"},
+    ),
   }
 
   critic_terms = {
@@ -106,6 +110,10 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "joint_pos": ObservationTermCfg(func=mdp.joint_pos_rel),
     "joint_vel": ObservationTermCfg(func=mdp.joint_vel_rel),
     "actions": ObservationTermCfg(func=mdp.last_action),
+    "motion_phase": ObservationTermCfg(
+      func=mdp.motion_phase,
+      params={"command_name": "motion"},
+    ),
   }
 
   observations = {
@@ -154,7 +162,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       velocity_range=VELOCITY_RANGE,
       joint_position_range=(-0.1, 0.1),
       # Override in robot cfg.
-      motion_file="",
+      motion_files=[],
       anchor_body_name="",
       body_names=(),
     )

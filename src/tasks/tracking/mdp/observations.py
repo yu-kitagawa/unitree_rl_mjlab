@@ -67,3 +67,20 @@ def robot_body_ori_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
   )
   mat = matrix_from_quat(ori_b)
   return mat[..., :2].reshape(mat.shape[0], -1)
+
+
+def motion_phase(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+) -> torch.Tensor:
+
+  command = cast(
+    MotionCommand,
+    env.command_manager.get_term(command_name),
+  )
+  lengths = command.motion_lengths[command.motion_ids]
+
+  return (
+    command.time_steps.float()
+    / lengths.float()
+  ).unsqueeze(-1)
