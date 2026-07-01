@@ -95,6 +95,16 @@ class MotionCommand(CommandTerm):
       [m.time_step_total for m in self.motions],
       device=self.device
     )
+    self.max_motion_length = int(self.motion_lengths.max())
+
+    self.motion_joint_pos = self._stack_motion_tensor("joint_pos")
+    self.motion_joint_vel = self._stack_motion_tensor("joint_vel")
+    self.motion_body_pos_w = self._stack_motion_tensor("body_pos_w")
+    self.motion_body_quat_w = self._stack_motion_tensor("body_quat_w")
+    self.motion_body_lin_vel_w = self._stack_motion_tensor("body_lin_vel_w")
+    self.motion_body_ang_vel_w = self._stack_motion_tensor("body_ang_vel_w")
+    self.motion_foot_contact = self._stack_motion_tensor("foot_contact")
+
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.body_pos_relative_w = torch.zeros(
       self.num_envs, len(cfg.body_names), 3, device=self.device
@@ -148,35 +158,44 @@ class MotionCommand(CommandTerm):
     # Ghost model created lazily on first visualization
     self._ghost_model: mujoco.MjModel | None = None
     self._ghost_color = np.array(cfg.viz.ghost_color, dtype=np.float32)
+
+  def _stack_motion_tensor(self, attr_name: str):
+    """
+    shape:
+        (num_motion, max_length, ...)
+    """
+
+    sample = getattr(self.motions[0], attr_name)
+
+    out = torch.empty(
+      (self.num_motions, self.max_motion_length, *sample.shape[1:]),
+      dtype=sample.dtype,
+      device=self.device,
+    )
+
+    for i, motion in enumerate(self.motions):
+
+      data = getattr(motion, attr_name)
+
+      length = data.shape[0]
+
+      out[i, :length] = data
+
+      # 後ろは最後のフレームで埋める
+      if length < self.max_motion_length:
+        out[i, length:] = data[-1]
+
+    return out
   
   def _get_motion_tensor(self, attr_name: str):
     """
     env毎のmotion_idに応じて値を集約
     """
 
-    sample_motion = self.motions[0]
-    sample_attr = getattr(sample_motion, attr_name)
-
-    result_shape = (self.num_envs,) + sample_attr.shape[1:]
-
-    result = torch.empty(
-      result_shape,
-      dtype=sample_attr.dtype,
-      device=self.device,
-    )
-
-    for motion_idx, motion in enumerate(self.motions):
-
-      env_ids = torch.where(self.motion_ids == motion_idx)[0]
-
-      if env_ids.numel() == 0:
-        continue
-
-      result[env_ids] = getattr(motion, attr_name)[
-        self.time_steps[env_ids]
-      ]
-
-    return result
+    return getattr(self, f"motion_{attr_name}")[
+      self.motion_ids,
+      self.time_steps,
+    ]
 
   @property
   def command(self) -> torch.Tensor:
