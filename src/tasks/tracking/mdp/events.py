@@ -27,7 +27,22 @@ class apply_motion_body_load:
     self._device = env.device
     self._command_body_ids: torch.Tensor | None = None
     self._command_name = cfg.params["command_name"]
-    self._force_magnitude = cfg.params["force_magnitude"]
+    force_magnitude = cfg.params["force_magnitude"]
+    if isinstance(force_magnitude, (int, float)):
+      self._force_magnitude_range = (float(force_magnitude),) * 2
+    elif isinstance(force_magnitude, tuple) and len(force_magnitude) == 2:
+      self._force_magnitude_range = tuple(map(float, force_magnitude))
+    else:
+      raise TypeError("force_magnitude must be a float or a (min, max) tuple.")
+    if self._force_magnitude_range[0] < 0.0:
+      raise ValueError("force_magnitude must be non-negative.")
+    if self._force_magnitude_range[0] > self._force_magnitude_range[1]:
+      raise ValueError("force_magnitude min must not exceed max.")
+
+    self._force_magnitudes = torch.empty(
+      (self._num_envs, 1), device=self._device, dtype=torch.float32
+    )
+    self._randomize_force_magnitudes()
     self._height_threshold = cfg.params["height_threshold"]
     self._transition_width = cfg.params.get("transition_width", 0.0)
 
@@ -41,22 +56,22 @@ class apply_motion_body_load:
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None,
     command_name: str,
-    force_magnitude: float,
+    force_magnitude: float | tuple[float, float],
     height_threshold: float,
     transition_width: float = 0.0,
     asset_cfg: SceneEntityCfg | None = None,
   ) -> None:
-    del asset_cfg  # Resolved and cached at initialization.
+    del asset_cfg, force_magnitude  # Resolved and cached at initialization.
     self._write_load(
       env=env,
       env_ids=env_ids,
       command_name=command_name,
-      force_magnitude=force_magnitude,
       height_threshold=height_threshold,
       transition_width=transition_width,
     )
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    self._randomize_force_magnitudes(env_ids)
     if not hasattr(self._env, "command_manager"):
       self._clear_load(env_ids)
       return
@@ -64,7 +79,6 @@ class apply_motion_body_load:
       env=self._env,
       env_ids=env_ids,
       command_name=self._command_name,
-      force_magnitude=self._force_magnitude,
       height_threshold=self._height_threshold,
       transition_width=self._transition_width,
     )
@@ -74,7 +88,6 @@ class apply_motion_body_load:
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None,
     command_name: str,
-    force_magnitude: float,
     height_threshold: float,
     transition_width: float,
   ) -> None:
@@ -99,7 +112,7 @@ class apply_motion_body_load:
       dtype=torch.float32,
     )
     torques = torch.zeros_like(forces)
-    forces[..., 2] = -force_magnitude * active_scale
+    forces[..., 2] = -self._force_magnitudes * active_scale
 
     if env_ids is not None:
       forces = forces[env_ids]
@@ -111,6 +124,16 @@ class apply_motion_body_load:
       env_ids=env_ids,
       body_ids=self._body_ids,
     )
+
+  def _randomize_force_magnitudes(
+    self, env_ids: torch.Tensor | slice | None = None
+  ) -> None:
+    lower, upper = self._force_magnitude_range
+    if env_ids is None:
+      self._force_magnitudes.uniform_(lower, upper)
+      return
+    samples = torch.empty_like(self._force_magnitudes[env_ids]).uniform_(lower, upper)
+    self._force_magnitudes[env_ids] = samples
 
   def _clear_load(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if env_ids is None or isinstance(env_ids, slice):

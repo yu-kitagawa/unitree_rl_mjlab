@@ -219,7 +219,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
           body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
         ),
         "command_name": "motion",
-        "force_magnitude": 9.81,
+        "force_magnitude": (0.0, 9.81),
         "height_threshold": 0.10,
         "transition_width": 0.03,
       },
