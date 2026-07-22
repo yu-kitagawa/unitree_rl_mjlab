@@ -100,6 +100,7 @@ class MotionCommand(CommandTerm):
     self.motion_joint_pos = self._stack_motion_tensor("joint_pos")
     self.motion_joint_vel = self._stack_motion_tensor("joint_vel")
     self.motion_body_pos_w = self._stack_motion_tensor("body_pos_w")
+    self.motion_body_max_height_w = self.motion_body_pos_w[..., 2].amax(dim=1)
     self.motion_body_quat_w = self._stack_motion_tensor("body_quat_w")
     self.motion_body_lin_vel_w = self._stack_motion_tensor("body_lin_vel_w")
     self.motion_body_ang_vel_w = self._stack_motion_tensor("body_ang_vel_w")
@@ -324,7 +325,8 @@ class MotionCommand(CommandTerm):
       self.joint_vel - self.robot_joint_vel, dim=-1
     )
 
-  def _adaptive_sampling(self, env_ids: torch.Tensor):
+  def _record_adaptive_failures(self, env_ids: torch.Tensor):
+    """Record failures against the motion active before command resampling."""
     episode_failed = self._env.termination_manager.terminated[env_ids]
 
     if torch.any(episode_failed):
@@ -348,13 +350,12 @@ class MotionCommand(CommandTerm):
           int(bin_count) - 1,
         )
 
-        #self._current_bin_failed[motion_idx].zero_()
-
         self._current_bin_failed[motion_idx, :bin_count] += torch.bincount(
           current_bins,
           minlength=int(bin_count),
         )
 
+  def _adaptive_sampling(self, env_ids: torch.Tensor):
     # Sample.
     for motion_idx in range(len(self.motions)):
 
@@ -429,6 +430,10 @@ class MotionCommand(CommandTerm):
       self.metrics["sampling_top1_bin"][motion_env] = 0.5  # No specific bin preference.
 
   def _resample_command(self, env_ids: torch.Tensor):
+    if self.cfg.sampling_mode == "adaptive":
+      # motion_ids and time_steps still identify the motion that just failed.
+      self._record_adaptive_failures(env_ids)
+
     self.motion_ids[env_ids] = torch.randint(
       0,
       len(self.motions),

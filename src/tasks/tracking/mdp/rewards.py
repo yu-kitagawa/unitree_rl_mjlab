@@ -143,10 +143,7 @@ def feet_clearance(
     foot_vel, dim=-1
   )
 
-  foot_max = torch.tensor(
-    [m.body_pos_w[:, body_indexes, 2].max() for m in command.motions],
-    device=foot_height.device
-  )
+  foot_max = command.motion_body_max_height_w[:, body_indexes].amax(dim=1)
   selected_foot_max = foot_max[command.motion_ids]
   selected_foot_max = selected_foot_max[:, None]
 

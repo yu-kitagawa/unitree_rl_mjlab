@@ -268,7 +268,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "foot_slip": RewardTermCfg(
       func=mdp.foot_slip_penalty,
-      weight=0.4,
+      weight=-0.25,
       params={"command_name": "motion"},
     ),
     "feet_gait": RewardTermCfg(
@@ -278,7 +278,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "soft_landing": RewardTermCfg(
       func=mdp.soft_landing,
-      weight=1e-3,
+      weight=-1e-3,
       params={"command_name": "motion"},
     ),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-1),
