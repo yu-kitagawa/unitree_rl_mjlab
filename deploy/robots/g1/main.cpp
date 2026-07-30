@@ -49,7 +49,9 @@ int main(int argc, char** argv)
     fsm->start();
 
     std::cout << "Press [L2 + Up] to enter FixStand mode.\n";
-    std::cout << "And then press [R2 + A] to start controlling the robot.\n";
+    std::cout << "Then press [R2 + A] for velocity control.\n";
+    std::cout << "Or press [R2 + Y] for arm-pose velocity control.\n";
+    std::cout << "In arm-pose mode, press [L1 + Up/Down] to raise/lower the arms.\n";
     std::cout << "And then press [R1 + A/B/Y/X] to control the robot dance.\n";
 
     while (true)
@@ -59,4 +61,3 @@ int main(int argc, char** argv)
     
     return 0;
 }
-

@@ -60,6 +60,28 @@ def track_angular_velocity(
   return torch.exp(-ang_vel_error / std**2)
 
 
+def track_joint_pose_exp(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward tracking a commanded absolute joint pose."""
+  asset: Entity = env.scene[asset_cfg.name]
+  target_joint_pos = env.command_manager.get_command(command_name)
+  current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+  if target_joint_pos.shape != current_joint_pos.shape:
+    raise ValueError(
+      f"Joint pose command shape {target_joint_pos.shape} does not match selected "
+      f"joint shape {current_joint_pos.shape}."
+    )
+  error = torch.mean(
+    torch.square((current_joint_pos - target_joint_pos) / std),
+    dim=1,
+  )
+  return torch.exp(-error)
+
+
 def body_orientation_l2(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -425,4 +447,3 @@ def stand_still(
             scale = (total_command <= command_threshold).float()
             reward *= scale
     return reward
-
