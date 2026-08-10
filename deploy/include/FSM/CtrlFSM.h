@@ -47,6 +47,11 @@ public:
 
     void start() 
     {
+        if (states.empty()) {
+            throw std::runtime_error(
+                "FSM has no states. Check that config/config.yaml was loaded."
+            );
+        }
         // Start From State_Passive
         currentState = states[0];
         currentState->enter();

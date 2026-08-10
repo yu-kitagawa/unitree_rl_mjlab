@@ -60,23 +60,29 @@ inline std::filesystem::path get_bin_path() {
 inline void load_config_file()
 {
     assert(std::filesystem::exists(bin_path)); // run param::helper before this function
-    if(bin_path.parent_path().filename() == "bin" || bin_path.parent_path().filename() == "build")
-    {
-        proj_dir = bin_path.parent_path().parent_path();
-        config_dir = proj_dir / "config";
+    const auto executable_dir = bin_path.parent_path();
+    const auto local_config = executable_dir / "config" / "config.yaml";
+    const auto parent_config =
+        executable_dir.parent_path() / "config" / "config.yaml";
+
+    if (std::filesystem::exists(local_config)) {
+        proj_dir = executable_dir;
+    } else if (std::filesystem::exists(parent_config)) {
+        // Supports build, build_sim, build_debug, and similarly named build
+        // directories without coupling configuration discovery to the name.
+        proj_dir = executable_dir.parent_path();
+    } else {
+        spdlog::critical(
+            "Could not find config/config.yaml next to {} or its parent.",
+            executable_dir.string()
+        );
+        exit(1);
     }
-    else
-    {
-        proj_dir = bin_path.parent_path();
-        config_dir = proj_dir;
-    }
+    config_dir = proj_dir / "config";
 
     try {
         std::string config_file = (config_dir / "config.yaml").string();
-        if(std::filesystem::exists(config_file))
-        {
-            config = YAML::LoadFile(config_file);
-        }
+        config = YAML::LoadFile(config_file);
     } catch (const YAML::BadFile& e) {
         spdlog::error("Failed to load config.yaml: {}", e.what());
         exit(1);

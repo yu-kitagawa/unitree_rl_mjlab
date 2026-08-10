@@ -46,6 +46,16 @@ Run the following command to train a velocity tracking policy:
 python scripts/train.py Unitree-G1-Flat --env.scene.num-envs=4096
 ```
 
+For G1 29-DoF object-front navigation with a head-camera/ArUco relative-pose
+observation:
+
+```bash
+python scripts/train.py Unitree-G1-Navigation-Flat --env.scene.num-envs=4096
+```
+
+Task details and observation conventions are documented in
+[`src/tasks/navigation/README.md`](src/tasks/navigation/README.md).
+
 Multi-GPU Training: Scale to multiple GPUs using --gpu-ids:
 
 ```bash
@@ -176,6 +186,36 @@ mkdir build && cd build
 cmake .. && make
 ```
 
+The G1 controller also includes the navigation policy at
+`deploy/robots/g1/config/policy/navigation/v0`. Controller mappings are:
+
+- `L2 + Up`: Passive to FixStand
+- `R2 + A`: FixStand/Navigation to Velocity
+- `R2 + B`: FixStand/Velocity to Navigation
+- `L2 + B`: return to Passive
+
+The Navigation target is the robot-base pose 1 m in front of the localization
+pose captured when Navigation is entered. On the real robot, the controller
+subscribes to `/glim_ros/odom` (`nav_msgs/msg/Odometry`) and uses its planar
+position and yaw instead of integrating the issued velocity command. It waits
+with a zero navigation command when the selected localization source is not
+available, and stops when updates exceed `odometry_timeout` (0.5 s by default).
+The source, topics, and timeout are configured in
+`deploy/robots/g1/config/policy/navigation/v0/params/deploy.yaml`.
+
+For sim2sim, the default `localization_source: auto` falls back to the MuJoCo
+truth position published on `rt/sportmodestate`; yaw comes from the simulated
+IMU in `rt/lowstate`. GLIM is preferred when both inputs are available. The
+selected source is fixed until Navigation is exited, preventing a coordinate
+frame change while walking. Set `localization_source` explicitly to `glim` or
+`simulator` when automatic selection is not desired.
+
+Build from a shell where the ROS 2 environment is sourced. The odometry pose's
+child frame must have its +x axis aligned with the G1 base forward direction;
+if GLIM tracks a sensor frame with a different mounting transform, publish a
+base-aligned odometry pose before using it here. Test suspended and in
+`unitree_mujoco` before running on the physical robot.
+
 #### 4.5 Deployment
 
 ## 4.5.1 Simulation Deployment
@@ -189,6 +229,14 @@ Build unitree_mujoco：
 cd simulate
 mkdir build && cd build
 cmake .. && make -j8
+```
+
+Build the G1 controller for sim2sim without a ROS 2 runtime dependency:
+
+```bash
+cmake -S deploy/robots/g1 -B deploy/robots/g1/build_sim \
+  -DG1_NAVIGATION_WITH_ROS2=OFF
+cmake --build deploy/robots/g1/build_sim -j8
 ```
 
 Launch the simulator (note that a gamepad must be connected):
@@ -206,6 +254,10 @@ cd deploy/robots/g1/build
 ./g1_ctrl --network=lo
 ```
 
+For the ROS-free build above, run
+`deploy/robots/g1/build_sim/g1_ctrl --network=lo`. It uses simulator truth
+localization and does not require sourcing a ROS 2 setup file.
+
 ## 4.5.2 Real-Robot Deployment
 
 Launch the control program on the real robot:
@@ -214,6 +266,10 @@ Launch the control program on the real robot:
 cd deploy/robots/g1/build
 ./g1_ctrl --network=enp5s0
 ```
+
+The real-robot GLIM build requires `G1_NAVIGATION_WITH_ROS2=ON` (the default).
+Source the matching ROS 2 environment before configuring, building, and
+running it, for example `source /opt/ros/jazzy/setup.bash`.
 
 **Arguments**：
 - `network`: The network interface used to connect to the robot. Use `lo` for simulation deployment, and `enp5s0` for the real robot(You can check it using the `ifconfig` command) 

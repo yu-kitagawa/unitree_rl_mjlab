@@ -3,6 +3,13 @@
 #include "FSM/State_FixStand.h"
 #include "FSM/State_RLBase.h"
 #include "State_Mimic.h"
+#include "State_Navigation.h"
+
+#ifdef G1_NAVIGATION_WITH_ROS2
+#include <rclcpp/rclcpp.hpp>
+
+#include <vector>
+#endif
 
 std::unique_ptr<LowCmd_t> FSMState::lowcmd = nullptr;
 std::shared_ptr<LowState_t> FSMState::lowstate = nullptr;
@@ -27,8 +34,31 @@ void init_fsm_state()
 
 int main(int argc, char** argv)
 {
+#ifdef G1_NAVIGATION_WITH_ROS2
+    // Keep ROS-specific arguments away from the controller's Boost parser.
+    auto controller_arguments = rclcpp::remove_ros_arguments(argc, argv);
+    std::vector<char*> controller_argv;
+    controller_argv.reserve(controller_arguments.size());
+    for (auto& argument : controller_arguments) {
+        controller_argv.push_back(argument.data());
+    }
+
     // Load parameters
+    auto vm = param::helper(
+        static_cast<int>(controller_argv.size()),
+        controller_argv.data()
+    );
+
+    // Preserve the controller's existing process-level signal handling.
+    rclcpp::init(
+        argc,
+        argv,
+        rclcpp::InitOptions(),
+        rclcpp::SignalHandlerOptions::None
+    );
+#else
     auto vm = param::helper(argc, argv);
+#endif
 
     std::cout << " --- Unitree Robotics --- \n";
     std::cout << "     G1-29dof Controller \n";
@@ -50,6 +80,8 @@ int main(int argc, char** argv)
 
     std::cout << "Press [L2 + Up] to enter FixStand mode.\n";
     std::cout << "And then press [R2 + A] to start controlling the robot.\n";
+    std::cout << "Press [R2 + B] to switch to the 1 m navigation goal.\n";
+    std::cout << "Press [R2 + A] to return from Navigation to Velocity.\n";
     std::cout << "And then press [R1 + A/B/Y/X] to control the robot dance.\n";
 
     while (true)
@@ -59,4 +91,3 @@ int main(int argc, char** argv)
     
     return 0;
 }
-
