@@ -258,6 +258,46 @@ For the ROS-free build above, run
 `deploy/robots/g1/build_sim/g1_ctrl --network=lo`. It uses simulator truth
 localization and does not require sourcing a ROS 2 setup file.
 
+### Live Navigation pose plot (sim2sim and real robot)
+
+From the repository root, start the plotter before or after entering Navigation:
+
+```bash
+python3 scripts/plot_deploy_navigation.py
+```
+
+Each Navigation entry truncates and then streams
+`deploy/robots/g1/log/navigation_pose.csv` at the policy rate. The CSV contains
+the relative-position and velocity commands, raw policy actions, processed
+joint commands, encoder joints, joint targets actually written to LowCmd,
+projected gravity, and the localization position/quaternion. The
+`slam_pose_*` columns contain GLIM odometry on the real robot and MuJoCo truth
+in sim2sim; use the `source` column (`glim` or `simulator`) to distinguish them.
+Quaternion columns are ordered `qx,qy,qz,qw`. `command_joint_*` is the
+processed policy target in policy joint order, while `action_joint_*` is the
+last exact `q` value written to the mapped LowCmd motor entry. Unavailable data
+is written as `nan` without stopping the other telemetry.
+
+The plotter opens a pose window and a joint window. The pose window shows
+`command_rel_pos` approaching zero and the localization pose projected onto an
+XY plane with heading markers. Every G1 joint is shown in a small subplot with
+`command_joints`, `encoder_joints`, and `action_joints` overlaid. To display
+only selected joints, pass their policy-order indices, for example:
+
+```bash
+python3 scripts/plot_deploy_navigation.py --joints 0 3 6 9 12
+```
+
+The title reports whether the data source is `simulator` or `glim`; missing or
+stale localization is shown explicitly. This file-based interface is identical
+for the ROS-free sim2sim build and ROS-enabled real-robot build, and keeps GUI
+work outside the control process.
+
+The path, enable flag, and flush interval can be changed with
+`pose_log_path`, `pose_log_enabled`, and `pose_log_flush_interval` in the
+Navigation `deploy.yaml`. If required, install plotting dependencies with
+`python3 -m pip install matplotlib numpy`.
+
 ## 4.5.2 Real-Robot Deployment
 
 Launch the control program on the real robot:

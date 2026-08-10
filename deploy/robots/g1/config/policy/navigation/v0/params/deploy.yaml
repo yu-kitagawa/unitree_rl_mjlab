@@ -17,7 +17,12 @@ commands:
     odometry_topic: /glim_ros/odom
     simulator_state_topic: rt/sportmodestate
     odometry_timeout: 0.5
-    goal_distance: 1.0
+    pose_log_enabled: true
+    pose_log_path: log/navigation_pose.csv
+    pose_log_flush_interval: 5
+    goal_x: 1.0
+    goal_y: 0.0
+    goal_yaw: 0.0
     stand_off_distance: 0.7
     camera_forward_offset: 0.05
     marker_camera_height_offset: -0.054

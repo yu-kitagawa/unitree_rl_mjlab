@@ -3,10 +3,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <eigen3/Eigen/Dense>
 #ifdef G1_NAVIGATION_WITH_ROS2
@@ -34,25 +37,38 @@ public:
     static State_Navigation* instance();
 
 private:
+    struct LocalizationPose
+    {
+        Eigen::Vector3f position{Eigen::Vector3f::Zero()};
+        Eigen::Quaternionf orientation{Eigen::Quaternionf::Identity()};
+        float heading{0.0f};
+    };
+
 #ifdef G1_NAVIGATION_WITH_ROS2
     void odometry_callback(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
 #endif
     bool read_latest_glim_odometry(
-        Eigen::Vector2f& position,
-        float& heading,
+        LocalizationPose& pose,
         float& age_seconds) const;
-    bool read_simulator_pose(
-        Eigen::Vector2f& position,
-        float& heading);
+    bool read_simulator_pose(LocalizationPose& pose);
     bool read_localization_pose(
-        Eigen::Vector2f& position,
-        float& heading,
+        LocalizationPose& pose,
         std::string& source,
         float& age_seconds);
     void reset_navigation_state();
     void update_navigation_state();
     void update_marker_observation(float camera_heading);
     void set_safe_stand_observations();
+    void open_pose_log();
+    void close_pose_log();
+    void write_pose_log(
+        bool localization_available,
+        const std::string& source,
+        const LocalizationPose& localization_pose,
+        float robot_heading,
+        const Eigen::Vector2f& goal_position_body,
+        float goal_heading_error,
+        float position_error);
 
     float root_heading() const;
     float camera_heading() const;
@@ -72,12 +88,17 @@ private:
     std::thread ros_thread;
 
     mutable std::mutex odometry_mutex;
-    Eigen::Vector2f latest_odometry_position{Eigen::Vector2f::Zero()};
-    float latest_odometry_heading{0.0f};
+    Eigen::Vector3f latest_odometry_position{Eigen::Vector3f::Zero()};
+    Eigen::Quaternionf latest_odometry_orientation{Eigen::Quaternionf::Identity()};
     std::chrono::steady_clock::time_point latest_odometry_received_at{};
     bool has_odometry{false};
 #endif
     unitree::robot::go2::subscription::SportModeState::SharedPtr simulator_state;
+
+    mutable std::mutex joint_command_mutex;
+    std::vector<float> latest_policy_action;
+    std::vector<float> latest_command_joints;
+    std::vector<float> last_sent_action_joints;
 
     Eigen::Vector2f estimated_position{Eigen::Vector2f::Zero()};
     Eigen::Vector2f initial_odometry_position{Eigen::Vector2f::Zero()};
@@ -89,12 +110,24 @@ private:
     std::array<float, 3> command{0.0f, 0.0f, 0.0f};
     std::array<float, 6> marker_pose_camera{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f};
 
+    std::ofstream pose_log;
+    std::chrono::steady_clock::time_point navigation_started_at{};
+    std::filesystem::path pose_log_path{"log/navigation_pose.csv"};
+    std::size_t pose_log_sample_count{0};
+    std::size_t pose_log_flush_interval{5};
+    bool pose_log_enabled{true};
+
     std::string localization_source{"auto"};
     std::string active_localization_source;
     std::string odometry_topic{"/glim_ros/odom"};
     std::string simulator_state_topic{"rt/sportmodestate"};
     float odometry_timeout{0.5f};
-    float goal_distance{1.0f};
+    struct NavigationGoal
+    {
+        Eigen::Vector2f position{1.0f, 0.0f};
+        float yaw{0.0f};
+    };
+    NavigationGoal goal;
     float stand_off_distance{0.7f};
     float camera_forward_offset{0.05f};
     float marker_camera_height_offset{-0.054f};

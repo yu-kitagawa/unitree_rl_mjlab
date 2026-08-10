@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <iomanip>
+#include <limits>
 #include <stdexcept>
 
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
@@ -98,8 +100,17 @@ State_Navigation::State_Navigation(int state_mode, std::string state_string)
     simulator_state_topic = nav_cfg["simulator_state_topic"].as<std::string>(
         simulator_state_topic
     );
+    pose_log_enabled = nav_cfg["pose_log_enabled"].as<bool>(pose_log_enabled);
+    pose_log_path = nav_cfg["pose_log_path"].as<std::string>(
+        pose_log_path.string()
+    );
+    pose_log_flush_interval = nav_cfg["pose_log_flush_interval"].as<std::size_t>(
+        pose_log_flush_interval
+    );
     odometry_timeout = nav_cfg["odometry_timeout"].as<float>(odometry_timeout);
-    goal_distance = nav_cfg["goal_distance"].as<float>(goal_distance);
+    goal.position.x() = nav_cfg["goal_x"].as<float>(goal.position.x());
+    goal.position.y() = nav_cfg["goal_y"].as<float>(goal.position.y());
+    goal.yaw = nav_cfg["goal_yaw"].as<float>(goal.yaw);
     stand_off_distance = nav_cfg["stand_off_distance"].as<float>(stand_off_distance);
     camera_forward_offset = nav_cfg["camera_forward_offset"].as<float>(camera_forward_offset);
     marker_camera_height_offset = nav_cfg["marker_camera_height_offset"].as<float>(marker_camera_height_offset);
@@ -136,13 +147,17 @@ State_Navigation::State_Navigation(int state_mode, std::string state_string)
         odometry_timeout <= 0.0f) {
         throw std::runtime_error("Invalid Navigation localization configuration.");
     }
-    if (goal_distance <= position_tolerance || stand_off_distance < 0.0f) {
+    if (pose_log_enabled &&
+        (pose_log_path.empty() || pose_log_flush_interval == 0)) {
+        throw std::runtime_error("Invalid Navigation pose log configuration.");
+    }
+    if (position_tolerance <= 0.0f || stand_off_distance < 0.0f) {
         throw std::runtime_error("Invalid Navigation goal or stand-off distance.");
     }
 
     marker_pose_camera = {
-        goal_distance + stand_off_distance - camera_forward_offset,
-        0.0f,
+        goal.position.x() + stand_off_distance * std::cos(goal.yaw) - camera_forward_offset * std::cos(goal.yaw),
+        goal.position.y() + stand_off_distance * std::sin(goal.yaw) - camera_forward_offset * std::sin(goal.yaw),
         marker_camera_height_offset,
         0.0f,
         0.0f,
@@ -204,6 +219,7 @@ State_Navigation::~State_Navigation()
     if (policy_thread.joinable()) {
         policy_thread.join();
     }
+    close_pose_log();
 #ifdef G1_NAVIGATION_WITH_ROS2
     if (ros_executor) {
         ros_executor->cancel();
@@ -231,6 +247,7 @@ void State_Navigation::enter()
 
     env->robot->update();
     reset_navigation_state();
+    open_pose_log();
     env->reset();
 
     action_ready = false;
@@ -245,6 +262,11 @@ void State_Navigation::enter()
             env->robot->update();
             update_navigation_state();
             env->step();
+            {
+                std::lock_guard<std::mutex> lock(joint_command_mutex);
+                latest_policy_action = env->action_manager->action();
+                latest_command_joints = env->action_manager->processed_actions();
+            }
             action_ready = true;
 
             std::this_thread::sleep_until(sleep_until);
@@ -258,9 +280,18 @@ void State_Navigation::run()
     if (!action_ready) {
         return;
     }
-    const auto action = env->action_manager->processed_actions();
+    std::lock_guard<std::mutex> lock(joint_command_mutex);
+    const auto& action = latest_command_joints;
+    if (action.size() != env->robot->data.joint_ids_map.size()) {
+        return;
+    }
+    if (last_sent_action_joints.size() != env->robot->data.joint_ids_map.size()) {
+        last_sent_action_joints.resize(env->robot->data.joint_ids_map.size());
+    }
     for (int i = 0; i < env->robot->data.joint_ids_map.size(); ++i) {
-        lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = action[i];
+        const int sdk_joint_id = env->robot->data.joint_ids_map[i];
+        lowcmd->msg_.motor_cmd()[sdk_joint_id].q() = action[i];
+        last_sent_action_joints[i] = lowcmd->msg_.motor_cmd()[sdk_joint_id].q();
     }
 }
 
@@ -270,6 +301,7 @@ void State_Navigation::exit()
     if (policy_thread.joinable()) {
         policy_thread.join();
     }
+    close_pose_log();
     action_ready = false;
 }
 
@@ -300,6 +332,7 @@ void State_Navigation::odometry_callback(
     const bool pose_is_finite =
         std::isfinite(position.x) &&
         std::isfinite(position.y) &&
+        std::isfinite(position.z) &&
         std::isfinite(orientation.x) &&
         std::isfinite(orientation.y) &&
         std::isfinite(orientation.z) &&
@@ -322,19 +355,19 @@ void State_Navigation::odometry_callback(
     quaternion.normalize();
 
     std::lock_guard<std::mutex> lock(odometry_mutex);
-    latest_odometry_position = Eigen::Vector2f(
+    latest_odometry_position = Eigen::Vector3f(
         static_cast<float>(position.x),
-        static_cast<float>(position.y)
+        static_cast<float>(position.y),
+        static_cast<float>(position.z)
     );
-    latest_odometry_heading = quaternion_heading(quaternion);
+    latest_odometry_orientation = quaternion;
     latest_odometry_received_at = std::chrono::steady_clock::now();
     has_odometry = true;
 }
 #endif
 
 bool State_Navigation::read_latest_glim_odometry(
-    Eigen::Vector2f& position,
-    float& heading,
+    LocalizationPose& pose,
     float& age_seconds) const
 {
 #ifdef G1_NAVIGATION_WITH_ROS2
@@ -343,23 +376,21 @@ bool State_Navigation::read_latest_glim_odometry(
         return false;
     }
 
-    position = latest_odometry_position;
-    heading = latest_odometry_heading;
+    pose.position = latest_odometry_position;
+    pose.orientation = latest_odometry_orientation;
+    pose.heading = quaternion_heading(pose.orientation);
     age_seconds = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - latest_odometry_received_at
     ).count();
     return true;
 #else
-    (void)position;
-    (void)heading;
+    (void)pose;
     (void)age_seconds;
     return false;
 #endif
 }
 
-bool State_Navigation::read_simulator_pose(
-    Eigen::Vector2f& position,
-    float& heading)
+bool State_Navigation::read_simulator_pose(LocalizationPose& pose)
 {
     if (!simulator_state || simulator_state->isTimeout()) {
         return false;
@@ -368,24 +399,31 @@ bool State_Navigation::read_simulator_pose(
     {
         std::lock_guard<std::mutex> lock(simulator_state->mutex_);
         const auto& simulator_position = simulator_state->msg_.position();
-        position = Eigen::Vector2f(
+        pose.position = Eigen::Vector3f(
             simulator_position[0],
-            simulator_position[1]
+            simulator_position[1],
+            simulator_position[2]
         );
     }
-    heading = root_heading();
-    return position.allFinite() && std::isfinite(heading);
+    pose.orientation = env->robot->data.root_quat_w;
+    if (pose.orientation.squaredNorm() < 1.0e-8f) {
+        return false;
+    }
+    pose.orientation.normalize();
+    pose.heading = quaternion_heading(pose.orientation);
+    return pose.position.allFinite() &&
+        pose.orientation.coeffs().allFinite() &&
+        std::isfinite(pose.heading);
 }
 
 bool State_Navigation::read_localization_pose(
-    Eigen::Vector2f& position,
-    float& heading,
+    LocalizationPose& pose,
     std::string& source,
     float& age_seconds)
 {
     const auto try_glim = [&]() {
         float glim_age = 0.0f;
-        if (!read_latest_glim_odometry(position, heading, glim_age) ||
+        if (!read_latest_glim_odometry(pose, glim_age) ||
             glim_age > odometry_timeout) {
             return false;
         }
@@ -394,7 +432,7 @@ bool State_Navigation::read_localization_pose(
         return true;
     };
     const auto try_simulator = [&]() {
-        if (!read_simulator_pose(position, heading)) {
+        if (!read_simulator_pose(pose)) {
             return false;
         }
         source = "simulator";
@@ -428,28 +466,51 @@ void State_Navigation::reset_navigation_state()
     position_reached = false;
     goal_reached = false;
     command = {0.0f, 0.0f, 0.0f};
+    {
+        std::lock_guard<std::mutex> lock(joint_command_mutex);
+        latest_policy_action.assign(
+            env->robot->data.joint_ids_map.size(),
+            std::numeric_limits<float>::quiet_NaN()
+        );
+        latest_command_joints.assign(
+            env->robot->data.joint_ids_map.size(),
+            std::numeric_limits<float>::quiet_NaN()
+        );
+        last_sent_action_joints.assign(
+            env->robot->data.joint_ids_map.size(),
+            std::numeric_limits<float>::quiet_NaN()
+        );
+    }
     set_safe_stand_observations();
 }
 
 void State_Navigation::update_navigation_state()
 {
-    Eigen::Vector2f odometry_position;
-    float odometry_heading = 0.0f;
+    LocalizationPose localization_pose;
     float odometry_age = 0.0f;
     std::string pose_source;
     const bool localization_available = read_localization_pose(
-        odometry_position,
-        odometry_heading,
+        localization_pose,
         pose_source,
         odometry_age
     );
     if (!localization_available) {
         command = {0.0f, 0.0f, 0.0f};
         set_safe_stand_observations();
+        const std::string waiting_for = active_localization_source.empty()
+            ? localization_source
+            : active_localization_source;
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        write_pose_log(
+            false,
+            waiting_for,
+            localization_pose,
+            nan,
+            Eigen::Vector2f(nan, nan),
+            nan,
+            nan
+        );
         if (!localization_warning_reported) {
-            const std::string waiting_for = active_localization_source.empty()
-                ? localization_source
-                : active_localization_source;
             spdlog::warn(
                 "Navigation is waiting for fresh {} localization.",
                 waiting_for
@@ -469,22 +530,25 @@ void State_Navigation::update_navigation_state()
 
     if (!goal_initialized) {
         active_localization_source = pose_source;
-        initial_odometry_position = odometry_position;
-        initial_odometry_heading = odometry_heading;
+        initial_odometry_position = localization_pose.position.head<2>();
+        initial_odometry_heading = localization_pose.heading;
         goal_initialized = true;
         spdlog::info(
-            "Navigation goal initialized {:.2f} m ahead from {} pose "
-            "x={:.3f}, y={:.3f}, yaw={:.3f} rad.",
-            goal_distance,
+            "Navigation goal initialized from {} pose "
+            "(x={:.3f}, y={:.3f}, yaw={:.3f}) "
+            "goal=(x={:.3f}, y={:.3f}, yaw={:.3f})",
             active_localization_source,
             initial_odometry_position.x(),
             initial_odometry_position.y(),
-            initial_odometry_heading
+            initial_odometry_heading,
+            goal.position.x(),
+            goal.position.y(),
+            goal.yaw
         );
     }
 
     const Eigen::Vector2f displacement =
-        odometry_position - initial_odometry_position;
+        localization_pose.position.head<2>() - initial_odometry_position;
     const float cos_initial_heading = std::cos(initial_odometry_heading);
     const float sin_initial_heading = std::sin(initial_odometry_heading);
     // Express GLIM displacement in the body-aligned frame captured on entry.
@@ -495,10 +559,10 @@ void State_Navigation::update_navigation_state()
             cos_initial_heading * displacement.y()
     );
     const float heading = wrap_to_pi(
-        odometry_heading - initial_odometry_heading
+        localization_pose.heading - initial_odometry_heading
     );
 
-    const Eigen::Vector2f target_position(goal_distance, 0.0f);
+    const Eigen::Vector2f target_position(goal.position.x(), goal.position.y());
     const Eigen::Vector2f delta_navigation =
         target_position - estimated_position;
     const float cos_heading = std::cos(heading);
@@ -510,7 +574,7 @@ void State_Navigation::update_navigation_state()
             cos_heading * delta_navigation.y()
     );
     const float distance = delta_body.norm();
-    const float heading_error = wrap_to_pi(-heading);
+    const float heading_error = wrap_to_pi(goal.yaw - heading);
 
     command[0] = std::clamp(
         position_control_stiffness * delta_body.x(),
@@ -554,11 +618,26 @@ void State_Navigation::update_navigation_state()
         camera_heading() - root_heading()
     );
     update_marker_observation(wrap_to_pi(heading + camera_heading_in_body));
+    write_pose_log(
+        true,
+        pose_source,
+        localization_pose,
+        heading,
+        delta_body,
+        heading_error,
+        distance
+    );
 }
 
 void State_Navigation::update_marker_observation(float camera_heading_relative)
 {
-    const Eigen::Vector2f object_position(goal_distance + stand_off_distance, 0.0f);
+    const Eigen::Vector2f stand_off(
+        stand_off_distance * std::cos(goal.yaw),
+        stand_off_distance * std::sin(goal.yaw)
+    );
+
+    const Eigen::Vector2f object_position =
+        Eigen::Vector2f(goal.position.x(), goal.position.y()) + stand_off;
     const Eigen::Vector2f camera_offset_navigation(
         std::cos(camera_heading_relative) * camera_forward_offset,
         std::sin(camera_heading_relative) * camera_forward_offset
@@ -607,6 +686,165 @@ void State_Navigation::set_safe_stand_observations()
         0.0f,
         -1.0f,
     };
+}
+
+void State_Navigation::open_pose_log()
+{
+    close_pose_log();
+    if (!pose_log_enabled) {
+        return;
+    }
+
+    auto resolved_path = pose_log_path;
+    if (resolved_path.is_relative()) {
+        resolved_path = param::proj_dir / resolved_path;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(resolved_path.parent_path(), error);
+    if (error) {
+        spdlog::error(
+            "Failed to create Navigation pose log directory {}: {}",
+            resolved_path.parent_path().string(),
+            error.message()
+        );
+        return;
+    }
+
+    pose_log.open(resolved_path, std::ios::out | std::ios::trunc);
+    if (!pose_log.is_open()) {
+        spdlog::error(
+            "Failed to open Navigation pose log {}.",
+            resolved_path.string()
+        );
+        return;
+    }
+
+    pose_log
+        << "time_s,source,localization_available,robot_x_m,robot_y_m,"
+        << "robot_yaw_rad,slam_pose_x_m,slam_pose_y_m,slam_pose_z_m,"
+        << "slam_pose_qx,slam_pose_qy,slam_pose_qz,slam_pose_qw,"
+        << "slam_pose_theta_rad,goal_x_m,goal_y_m,goal_yaw_rad,"
+        << "command_rel_pos_x_m,command_rel_pos_y_m,command_rel_yaw_rad,"
+        << "goal_body_x_m,goal_body_y_m,goal_yaw_error_rad,position_error_m,"
+        << "command_vx_mps,command_vy_mps,command_wz_radps,"
+        << "cmd_vx_mps,cmd_vy_mps,cmd_wz_radps,"
+        << "projected_gravity_x,projected_gravity_y,projected_gravity_z,"
+        << "goal_reached";
+    const std::size_t joint_count = env->robot->data.joint_ids_map.size();
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        pose_log << ",policy_action_joint_" << std::setw(2) << std::setfill('0') << i;
+    }
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        pose_log << ",command_joint_" << std::setw(2) << std::setfill('0') << i;
+    }
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        pose_log << ",encoder_joint_" << std::setw(2) << std::setfill('0') << i;
+    }
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        pose_log << ",action_joint_" << std::setw(2) << std::setfill('0') << i;
+    }
+    pose_log << std::setfill(' ') << '\n';
+    pose_log.flush();
+    navigation_started_at = std::chrono::steady_clock::now();
+    pose_log_sample_count = 0;
+    spdlog::info("Navigation pose log: {}", resolved_path.string());
+}
+
+void State_Navigation::close_pose_log()
+{
+    if (pose_log.is_open()) {
+        pose_log.flush();
+        pose_log.close();
+    }
+}
+
+void State_Navigation::write_pose_log(
+    bool localization_available,
+    const std::string& source,
+    const LocalizationPose& localization_pose,
+    float robot_heading,
+    const Eigen::Vector2f& goal_position_body,
+    float goal_heading_error,
+    float position_error)
+{
+    if (!pose_log.is_open()) {
+        return;
+    }
+
+    const float elapsed_seconds = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - navigation_started_at
+    ).count();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const auto& slam_position = localization_pose.position;
+    const auto& slam_orientation = localization_pose.orientation;
+    const auto encoder_joints = env->robot->data.joint_pos;
+    const auto projected_gravity = env->robot->data.projected_gravity_b;
+    std::vector<float> policy_action;
+    std::vector<float> command_joints;
+    std::vector<float> action_joints;
+    {
+        std::lock_guard<std::mutex> lock(joint_command_mutex);
+        policy_action = latest_policy_action;
+        command_joints = latest_command_joints;
+        action_joints = last_sent_action_joints;
+    }
+    pose_log
+        << std::fixed << std::setprecision(6)
+        << elapsed_seconds << ','
+        << source << ','
+        << (localization_available ? 1 : 0) << ','
+        << (localization_available ? estimated_position.x() :
+            nan) << ','
+        << (localization_available ? estimated_position.y() :
+            nan) << ','
+        << robot_heading << ','
+        << (localization_available ? slam_position.x() : nan) << ','
+        << (localization_available ? slam_position.y() : nan) << ','
+        << (localization_available ? slam_position.z() : nan) << ','
+        << (localization_available ? slam_orientation.x() : nan) << ','
+        << (localization_available ? slam_orientation.y() : nan) << ','
+        << (localization_available ? slam_orientation.z() : nan) << ','
+        << (localization_available ? slam_orientation.w() : nan) << ','
+        << (localization_available ? localization_pose.heading : nan) << ','
+        << goal.position.x() << ','
+        << goal.position.y() << ','
+        << goal.yaw << ','
+        << goal_position_body.x() << ','
+        << goal_position_body.y() << ','
+        << goal_heading_error << ','
+        << goal_position_body.x() << ','
+        << goal_position_body.y() << ','
+        << goal_heading_error << ','
+        << position_error << ','
+        << command[0] << ','
+        << command[1] << ','
+        << command[2] << ','
+        << command[0] << ','
+        << command[1] << ','
+        << command[2] << ','
+        << projected_gravity.x() << ','
+        << projected_gravity.y() << ','
+        << projected_gravity.z() << ','
+        << (goal_reached ? 1 : 0);
+
+    const std::size_t joint_count = env->robot->data.joint_ids_map.size();
+    const auto write_joint_values = [&](const auto& values) {
+        for (std::size_t i = 0; i < joint_count; ++i) {
+            pose_log << ',' << (i < static_cast<std::size_t>(values.size())
+                ? values[i]
+                : nan);
+        }
+    };
+    write_joint_values(policy_action);
+    write_joint_values(command_joints);
+    write_joint_values(encoder_joints);
+    write_joint_values(action_joints);
+    pose_log << '\n';
+
+    ++pose_log_sample_count;
+    if (pose_log_sample_count % pose_log_flush_interval == 0) {
+        pose_log.flush();
+    }
 }
 
 float State_Navigation::root_heading() const
