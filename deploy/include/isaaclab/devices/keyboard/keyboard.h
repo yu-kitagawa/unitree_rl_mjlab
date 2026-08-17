@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <iostream>
 #include <string>
 #include <vector>
 #include <deque>
@@ -23,18 +25,12 @@ public:
     _newSettings.c_lflag &= (~ICANON & ~ECHO);
 
     _startKey();
-
-    _thread_running  = true;
-    _readThread = std::thread([this] {
-      while (_running) {
-        _read();
-      }
-    });
+    _startReadThread();
   }
 
   ~Keyboard()
   {
-    _thread_running = false;
+    _stopReadThread();
     _pauseKey();
   }
 
@@ -69,8 +65,9 @@ public:
    */
   std::string getString(std::string slogan)
   {
-    // Stop reading keyboard value
-    _running = false;
+    // Stop and join the raw-key reader so it cannot consume characters meant
+    // for the line-oriented prompt.
+    _stopReadThread();
     _pauseKey();
 
     std::string stringtemp;
@@ -79,7 +76,7 @@ public:
 
     // Restart reading keyboard value
     _startKey();
-    _running = true;
+    _startReadThread();
 
     return stringtemp;
   }
@@ -91,9 +88,28 @@ public:
   bool on_released = false;
 
   private:
-  bool _thread_running = false;
-  bool _running = false;
+  std::atomic_bool _thread_running{false};
+  std::atomic_bool _running{false};
   std::thread _readThread;
+
+  void _startReadThread()
+  {
+    _thread_running = true;
+    _readThread = std::thread([this] {
+      while (_thread_running) {
+        _read();
+      }
+    });
+  }
+
+  void _stopReadThread()
+  {
+    _running = false;
+    _thread_running = false;
+    if (_readThread.joinable()) {
+      _readThread.join();
+    }
+  }
 
   void _read()
   {

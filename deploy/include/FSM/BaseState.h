@@ -20,6 +20,11 @@ public:
 
     virtual void enter() {}
 
+    // Return false to defer a requested transition while the current state
+    // keeps running. The FSM calls this again until the target is ready.
+    virtual bool prepare_enter() { return true; }
+    virtual void cancel_prepare_enter() {}
+
     virtual void pre_run() {}
     virtual void run() {}
     virtual void post_run() {}

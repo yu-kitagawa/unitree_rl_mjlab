@@ -84,12 +84,59 @@ public:
 private:
     const double dt = 0.001;
 
+    void change_state(const std::shared_ptr<BaseState>& next_state)
+    {
+        spdlog::info(
+            "FSM: Change state from {} to {}",
+            currentState->getStateString(),
+            next_state->getStateString()
+        );
+        currentState->exit();
+        currentState = next_state;
+        currentState->enter();
+    }
+
+    std::shared_ptr<BaseState> find_state(int state_mode)
+    {
+        for (auto& state : states) {
+            if (state->isState(state_mode)) {
+                return state;
+            }
+        }
+        return nullptr;
+    }
+
     void run_()
     {
         currentState->pre_run();
         currentState->run();
         currentState->post_run();
         
+        // A target may defer entry while, for example, console input is being
+        // collected on another thread. Keep controlling the current state in
+        // the meantime, but always allow Passive safety transitions through.
+        if (pendingState) {
+            const int passive_state = FSMStringMap.right.at("Passive");
+            for (const auto& check : currentState->registered_checks) {
+                if (check.second == passive_state && check.first()) {
+                    pendingState->cancel_prepare_enter();
+                    pendingState.reset();
+                    const auto passive = find_state(passive_state);
+                    if (passive && !currentState->isState(passive_state)) {
+                        change_state(passive);
+                    }
+                    return;
+                }
+            }
+
+            if (pendingState->prepare_enter()) {
+                const auto ready_state = pendingState;
+                pendingState.reset();
+                change_state(ready_state);
+            }
+            return;
+        }
+
         // Check if need to change state
         int nextStateMode = 0;
         for(int i(0); i<currentState->registered_checks.size(); i++)
@@ -103,20 +150,22 @@ private:
 
         if(nextStateMode != 0 && !currentState->isState(nextStateMode))
         {
-            for(auto & state : states)
-            {
-                if(state->isState(nextStateMode))
-                {
-                    spdlog::info("FSM: Change state from {} to {}", currentState->getStateString(), state->getStateString());
-                    currentState->exit();
-                    currentState = state;
-                    currentState->enter();
-                    break;
+            const auto next_state = find_state(nextStateMode);
+            if (next_state) {
+                if (next_state->prepare_enter()) {
+                    change_state(next_state);
+                } else {
+                    pendingState = next_state;
+                    spdlog::info(
+                        "FSM: Waiting to enter {}.",
+                        pendingState->getStateString()
+                    );
                 }
             }
         }
     }
 
     std::shared_ptr<BaseState> currentState;
+    std::shared_ptr<BaseState> pendingState;
     unitree::common::RecurrentThreadPtr fsm_thread_;
 };

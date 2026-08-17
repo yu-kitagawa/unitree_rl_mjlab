@@ -6,6 +6,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
@@ -111,6 +112,9 @@ State_Navigation::State_Navigation(int state_mode, std::string state_string)
     goal.position.x() = nav_cfg["goal_x"].as<float>(goal.position.x());
     goal.position.y() = nav_cfg["goal_y"].as<float>(goal.position.y());
     goal.yaw = nav_cfg["goal_yaw"].as<float>(goal.yaw);
+    prompt_goal_on_entry = nav_cfg["prompt_goal_on_entry"].as<bool>(
+        prompt_goal_on_entry
+    );
     stand_off_distance = nav_cfg["stand_off_distance"].as<float>(stand_off_distance);
     camera_forward_offset = nav_cfg["camera_forward_offset"].as<float>(camera_forward_offset);
     marker_camera_height_offset = nav_cfg["marker_camera_height_offset"].as<float>(marker_camera_height_offset);
@@ -273,6 +277,111 @@ void State_Navigation::enter()
             sleep_until += dt;
         }
     });
+}
+
+bool State_Navigation::prepare_enter()
+{
+    if (!prompt_goal_on_entry) {
+        return true;
+    }
+    if (goal_input_ready.exchange(false)) {
+        goal_input_requested = false;
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(goal_input_mutex);
+        if (goal_input_active || goal_input_ready) {
+            return false;
+        }
+        goal_input_cancelled = false;
+        goal_input_requested = true;
+    }
+    return false;
+}
+
+void State_Navigation::cancel_prepare_enter()
+{
+    std::lock_guard<std::mutex> lock(goal_input_mutex);
+    goal_input_requested = false;
+    goal_input_ready = false;
+    goal_input_cancelled = true;
+}
+
+void State_Navigation::process_goal_input()
+{
+    if (!prompt_goal_on_entry || !goal_input_requested) {
+        return;
+    }
+
+    bool expected_inactive = false;
+    if (!goal_input_active.compare_exchange_strong(expected_inactive, true)) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(goal_input_mutex);
+        goal_input_requested = false;
+    }
+
+    NavigationGoal selected_goal = goal;
+    while (true) {
+        std::ostringstream prompt;
+        prompt
+            << "Enter Navigation goal x y yaw_rad in the robot frame at entry "
+            << "(current: " << std::fixed << std::setprecision(3)
+            << goal.position.x() << ' ' << goal.position.y() << ' '
+            << goal.yaw << ", empty = keep current):";
+        const std::string input = keyboard
+            ? keyboard->getString(prompt.str())
+            : std::string{};
+
+        if (input.find_first_not_of(" \t\r\n") == std::string::npos) {
+            break;
+        }
+
+        std::string normalized_input = input;
+        std::replace(normalized_input.begin(), normalized_input.end(), ',', ' ');
+        std::istringstream parser(normalized_input);
+        float goal_x = 0.0f;
+        float goal_y = 0.0f;
+        float goal_yaw = 0.0f;
+        std::string trailing_value;
+        if ((parser >> goal_x >> goal_y >> goal_yaw) &&
+            !(parser >> trailing_value) &&
+            std::isfinite(goal_x) &&
+            std::isfinite(goal_y) &&
+            std::isfinite(goal_yaw)) {
+            selected_goal.position = Eigen::Vector2f(goal_x, goal_y);
+            selected_goal.yaw = wrap_to_pi(goal_yaw);
+            break;
+        }
+
+        spdlog::warn(
+            "Invalid Navigation goal. Enter three finite values: x y yaw_rad."
+        );
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(goal_input_mutex);
+        goal_input_requested = false;
+        if (goal_input_cancelled) {
+            goal_input_cancelled = false;
+            goal_input_active = false;
+            spdlog::warn(
+                "Navigation goal input discarded because the pending "
+                "transition was cancelled."
+            );
+            return;
+        }
+        goal = selected_goal;
+        spdlog::info(
+            "Navigation goal selected: x={:.3f}, y={:.3f}, yaw={:.3f} rad.",
+            goal.position.x(),
+            goal.position.y(),
+            goal.yaw
+        );
+        goal_input_ready = true;
+        goal_input_active = false;
+    }
 }
 
 void State_Navigation::run()

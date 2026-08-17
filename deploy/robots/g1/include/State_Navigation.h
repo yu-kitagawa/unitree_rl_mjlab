@@ -28,8 +28,12 @@ public:
     ~State_Navigation();
 
     void enter() override;
+    bool prepare_enter() override;
+    void cancel_prepare_enter() override;
     void run() override;
     void exit() override;
+
+    void process_goal_input();
 
     std::vector<float> command_observation() const;
     std::vector<float> marker_observation() const;
@@ -128,6 +132,12 @@ private:
         float yaw{0.0f};
     };
     NavigationGoal goal;
+    std::atomic_bool goal_input_requested{false};
+    std::atomic_bool goal_input_active{false};
+    std::atomic_bool goal_input_ready{false};
+    std::atomic_bool goal_input_cancelled{false};
+    std::mutex goal_input_mutex;
+    bool prompt_goal_on_entry{true};
     float stand_off_distance{0.7f};
     float camera_forward_offset{0.05f};
     float marker_camera_height_offset{-0.054f};

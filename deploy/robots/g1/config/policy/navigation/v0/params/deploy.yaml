@@ -20,6 +20,9 @@ commands:
     pose_log_enabled: true
     pose_log_path: log/navigation_pose.csv
     pose_log_flush_interval: 5
+    # Prompt for x y yaw_rad before every transition into Navigation.
+    # Set false for non-interactive deployment and use goal_x/y/yaw below.
+    prompt_goal_on_entry: true
     goal_x: 1.0
     goal_y: 0.0
     goal_yaw: 0.0

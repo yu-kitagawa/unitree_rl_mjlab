@@ -258,6 +258,20 @@ For the ROS-free build above, run
 `deploy/robots/g1/build_sim/g1_ctrl --network=lo`. It uses simulator truth
 localization and does not require sourcing a ROS 2 setup file.
 
+When `R2 + B` requests Navigation, the controller prompts in its terminal:
+
+```text
+Enter Navigation goal x y yaw_rad in the robot frame at entry (...):
+```
+
+For example, `1.0 0.2 0.0` sets a goal 1 m forward and 0.2 m left, with zero
+relative yaw. Comma-separated input is also accepted. The coordinates are
+relative to the robot pose captured when Navigation starts. Pressing Enter on
+an empty line keeps the displayed goal. While the prompt is waiting, the
+current FSM state and LowCmd publishing continue; Navigation starts only after
+valid input. Set `prompt_goal_on_entry: false` in the Navigation `deploy.yaml`
+for non-interactive operation using `goal_x`, `goal_y`, and `goal_yaw`.
+
 ### Live Navigation pose plot (sim2sim and real robot)
 
 From the repository root, start the plotter before or after entering Navigation:
