@@ -1,5 +1,6 @@
 """Unitree G1 29-DoF object-front navigation configurations."""
 
+from src import SRC_PATH
 from src.assets.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
@@ -8,11 +9,119 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from src.tasks.navigation import mdp
-from src.tasks.navigation.mdp import GoalPoseCommandCfg
+from src.tasks.navigation.mdp import (
+  GoalPoseCommandCfg,
+  MotionDerivedJointPoseCommandCfg,
+)
 from src.tasks.navigation.velocity_env_cfg import make_navigation_env_cfg
+
+
+_G1_MOTION_JOINT_NAMES = (
+  "left_hip_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_yaw_joint",
+  "left_knee_joint",
+  "left_ankle_pitch_joint",
+  "left_ankle_roll_joint",
+  "right_hip_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_yaw_joint",
+  "right_knee_joint",
+  "right_ankle_pitch_joint",
+  "right_ankle_roll_joint",
+  "waist_yaw_joint",
+  "waist_roll_joint",
+  "waist_pitch_joint",
+  "left_shoulder_pitch_joint",
+  "left_shoulder_roll_joint",
+  "left_shoulder_yaw_joint",
+  "left_elbow_joint",
+  "left_wrist_roll_joint",
+  "left_wrist_pitch_joint",
+  "left_wrist_yaw_joint",
+  "right_shoulder_pitch_joint",
+  "right_shoulder_roll_joint",
+  "right_shoulder_yaw_joint",
+  "right_elbow_joint",
+  "right_wrist_roll_joint",
+  "right_wrist_pitch_joint",
+  "right_wrist_yaw_joint",
+)
+
+_G1_ARM_JOINT_NAMES = tuple(
+  name
+  for name in _G1_MOTION_JOINT_NAMES
+  if any(part in name for part in ("shoulder", "elbow", "wrist"))
+)
+
+_G1_NON_ARM_JOINT_NAMES = tuple(
+  name for name in _G1_MOTION_JOINT_NAMES if name not in _G1_ARM_JOINT_NAMES
+)
+
+_ARM_MOTION_DIR = SRC_PATH / "assets" / "motions" / "g1" / "arm_vel"
+
+
+def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Condition navigation on equally sampled arm-up and arm-down poses."""
+  cfg.commands["arm_pose"] = MotionDerivedJointPoseCommandCfg(
+    entity_name="robot",
+    joint_names=_G1_ARM_JOINT_NAMES,
+    motion_joint_names=_G1_MOTION_JOINT_NAMES,
+    motion_files=(
+      str(_ARM_MOTION_DIR / "arm_down.npz"),
+      str(_ARM_MOTION_DIR / "arm_up.npz"),
+    ),
+    # arm_down walks in [0, 80). arm_up holds the raised pose in [170, 260).
+    motion_frame_ranges=((0, 80), (170, 260)),
+    sampling_weights=(1.0, 1.0),
+    # Keep the sampled pose fixed for the whole episode.
+    resampling_time_range=(1.0e9, 1.0e9),
+    debug_vis=False,
+  )
+
+  for group_name in ("actor", "critic"):
+    cfg.observations[group_name].terms["arm_pose"] = ObservationTermCfg(
+      func=mdp.generated_commands,
+      params={"command_name": "arm_pose"},
+    )
+
+  arm_asset_cfg = SceneEntityCfg(
+    "robot",
+    joint_names=_G1_ARM_JOINT_NAMES,
+    preserve_order=True,
+  )
+  cfg.rewards["arm_pose"] = RewardTermCfg(
+    func=mdp.track_joint_pose_exp,
+    weight=1.0,
+    params={
+      "std": 0.15,
+      "command_name": "arm_pose",
+      "asset_cfg": arm_asset_cfg,
+    },
+  )
+
+  # The generic posture rewards target the default arm pose, so limit them to
+  # the lower body and waist and let the arm command own the arm joints.
+  # SceneEntityCfg is resolved in place by each manager term. Do not share one
+  # instance between rewards: resolving it twice makes mjlab validate the
+  # original tuple of names against its already-resolved list of joint IDs.
+  for reward_name in ("pose", "stand_still"):
+    cfg.rewards[reward_name].params["asset_cfg"] = SceneEntityCfg(
+      "robot",
+      joint_names=_G1_NON_ARM_JOINT_NAMES,
+      preserve_order=True,
+    )
+  for std_name in ("std_walking", "std_running"):
+    cfg.rewards["pose"].params[std_name] = {
+      pattern: value
+      for pattern, value in cfg.rewards["pose"].params[std_name].items()
+      if not any(part in pattern for part in ("shoulder", "elbow", "wrist"))
+    }
 
 
 def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -139,6 +248,8 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     weight=-1.0,
     params={"sensor_name": self_collision_cfg.name, "force_threshold": 10.0},
   )
+
+  _add_episode_arm_pose_task(cfg)
 
   # Apply play mode overrides.
   if play:

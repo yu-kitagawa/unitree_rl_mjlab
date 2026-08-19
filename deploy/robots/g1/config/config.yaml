@@ -81,7 +81,9 @@ FSM:
       Passive: LT + B.on_pressed
       Velocity: RT + A.on_pressed
 
-    policy_dir: config/policy/navigation/v0
+    # Select the newest complete policy directory. v0 remains the fallback;
+    # v1_arm becomes active after its exported/policy.onnx is installed.
+    policy_dir: config/policy/navigation
 
 
   Mimic_Dance1_subject2:

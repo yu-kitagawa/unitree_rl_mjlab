@@ -186,12 +186,13 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-The G1 controller also includes the navigation policy at
-`deploy/robots/g1/config/policy/navigation/v0`. Controller mappings are:
+The G1 controller also includes navigation policies under
+`deploy/robots/g1/config/policy/navigation`. Controller mappings are:
 
 - `L2 + Up`: Passive to FixStand
 - `R2 + A`: FixStand/Navigation to Velocity
 - `R2 + B`: FixStand/Velocity to Navigation
+- `L1 + Up/Down`: raise/lower the arms in arm-enabled Navigation
 - `L2 + B`: return to Passive
 
 The Navigation target is the robot-base pose 1 m in front of the localization
@@ -200,8 +201,15 @@ subscribes to `/glim_ros/odom` (`nav_msgs/msg/Odometry`) and uses its planar
 position and yaw instead of integrating the issued velocity command. It waits
 with a zero navigation command when the selected localization source is not
 available, and stops when updates exceed `odometry_timeout` (0.5 s by default).
-The source, topics, and timeout are configured in
-`deploy/robots/g1/config/policy/navigation/v0/params/deploy.yaml`.
+The source, topics, and timeout are configured in the selected Navigation
+policy's `params/deploy.yaml`.
+
+Navigation training samples the arm-up and arm-down targets from `arm_vel`
+with equal probability. Its actor has 118 inputs (the original 104 plus the
+14-joint arm target). Copy the retrained ONNX model to
+`deploy/robots/g1/config/policy/navigation/v1_arm/exported/policy.onnx`; until
+that file is present the controller keeps selecting the existing 104-input
+`v0` policy.
 
 For sim2sim, the default `localization_source: auto` falls back to the MuJoCo
 truth position published on `rt/sportmodestate`; yaw comes from the simulated

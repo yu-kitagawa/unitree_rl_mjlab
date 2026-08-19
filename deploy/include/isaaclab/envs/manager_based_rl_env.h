@@ -5,6 +5,10 @@
 
 #include <eigen3/Eigen/Dense>
 #include <yaml-cpp/yaml.h>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include "isaaclab/manager/observation_manager.h"
 #include "isaaclab/manager/action_manager.h"
 #include "isaaclab/assets/articulation/articulation.h"
@@ -65,6 +69,22 @@ public:
         action_manager->process_action(action);
     }
 
+    void set_command(const std::string& name, const std::vector<float>& value)
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        command_values_[name] = value;
+    }
+
+    std::vector<float> get_command(const std::string& name)
+    {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        const auto it = command_values_.find(name);
+        if (it == command_values_.end()) {
+            return {};
+        }
+        return it->second;
+    }
+
     float step_dt;
     
     YAML::Node cfg;
@@ -75,6 +95,10 @@ public:
     std::unique_ptr<Algorithms> alg;
     long episode_length = 0;
     float global_phase = 0.0f;
+
+private:
+    std::mutex command_mutex_;
+    std::unordered_map<std::string, std::vector<float>> command_values_;
 };
 
 };

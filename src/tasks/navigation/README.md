@@ -10,6 +10,7 @@
 - ArUco面はロボット側を向きます。
 - 目標ロボット姿勢は物体から `0.7 m` 手前で、物体の方向を向く姿勢です。
 - 目標は `4–8 s` ごとに更新されます。
+- 腕姿勢は各episodeのreset時に上/下を同確率で選び、そのepisode中は固定します。
 
 頭部カメラ基準のActor観測 `marker_pose_camera` は次の6要素です。
 
@@ -26,6 +27,11 @@ ArUco姿勢推定から同じ量を生成してください。角度を `sin/cos
 なので `0〜25 step` に相当し、そのenvのエピソード中は同じ遅延を保持します。
 Actorの `marker_pose_camera` のみが遅延し、Criticには現在値を渡します。
 play設定ではこの遅延を無効にしています。
+
+Actor/Criticには左右の肩・肘・手首14関節の目標姿勢 `arm_pose` も追加します。
+姿勢は `arm_vel` と同じ `arm_down.npz` / `arm_up.npz` の歩行区間から中央値を
+取り出しています。従来の姿勢報酬は下半身と腰だけに適用し、腕には独立した
+目標姿勢追従報酬を適用します。
 
 自己位置推定の平面位置には、各env・各制御stepでゼロ平均ガウスノイズを
 加えます。通常99%は標準偏差 `0.01 m`、機器誤作動を表す残り1%は標準偏差
@@ -79,6 +85,18 @@ python scripts/play.py Unitree-G1-Navigation-Flat \
   --checkpoint_file=logs/rsl_rl/g1_navigation/<run>/model_<iteration>.pt
 ```
 
+腕条件付きActorの入力は従来の104次元に腕目標14次元を加えた118次元です。
+deployでは学習済みONNXを次へ配置すると、既存の`v0`より`v1_arm`が優先されます。
+
+```bash
+mkdir -p deploy/robots/g1/config/policy/navigation/v1_arm/exported
+cp logs/rsl_rl/g1_navigation/<run>/policy.onnx \
+  deploy/robots/g1/config/policy/navigation/v1_arm/exported/policy.onnx
+```
+
+Navigation実行中は`L1 + Up`で腕上げ、`L1 + Down`で腕下げへ切り替えます。
+目標は`0.15 rad/s`を上限として補間され、急な姿勢変更を避けます。
+
 主要な調整箇所は以下です。
 
 - 停止距離: `GoalPoseCommandCfg.stand_off_distance`
@@ -90,3 +108,4 @@ python scripts/play.py Unitree-G1-Navigation-Flat \
   `localization_position_noise_std`, `localization_outlier_probability`,
   `localization_outlier_position_std`
 - constellation報酬: `decay`, `constellation_radius`, termの`weight`
+- 腕姿勢: `_add_episode_arm_pose_task`のmotion区間、sampling weight、追従報酬

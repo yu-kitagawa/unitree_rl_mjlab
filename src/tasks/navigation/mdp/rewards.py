@@ -76,12 +76,12 @@ def goal_stillness_reward(
   joint_vel_std: float = 0.5,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Reward a complete stop after the navigation position has been reached.
+  """Reward stopping without opposing the final heading correction.
 
-  This term is inactive while approaching.  Once the position latch is set,
-  it rewards zero planar base velocity, zero base angular velocity, and zero
-  joint velocity.  Normalizing each component gives the policy a much stronger
-  stopping gradient than the generic velocity-tracking reward alone.
+  After the position latch is set, this term rewards zero planar base velocity.
+  Zero base angular velocity and zero joint velocity are rewarded only after
+  the heading latch is also set, so the policy remains free to rotate toward
+  the goal heading while holding the goal position.
   """
   asset: Entity = env.scene[asset_cfg.name]
   command = cast(GoalPoseCommand, env.command_manager.get_term(command_name))
@@ -98,12 +98,14 @@ def goal_stillness_reward(
   # Separate Cauchy kernels keep a useful gradient at approach speed.  The
   # previous product exponential was already around 1e-6 at 0.35 m/s and
   # provided effectively no braking signal in training.
+  position_reached = command.is_position_reached.float()
+  goal_reached = command.is_goal_reached.float()
   stillness = (
-    1.0 / (1.0 + lin_vel_error)
-    + 1.0 / (1.0 + ang_vel_error)
-    + 1.0 / (1.0 + joint_vel_error)
+    position_reached / (1.0 + lin_vel_error)
+    + goal_reached / (1.0 + ang_vel_error)
+    + goal_reached / (1.0 + joint_vel_error)
   ) / 3.0
-  return stillness * command.is_position_reached.float()
+  return stillness
 
 
 def track_linear_velocity(
@@ -144,6 +146,28 @@ def track_angular_velocity(
   xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
   ang_vel_error = z_error + (0.05 * xy_error)
   return torch.exp(-ang_vel_error / std**2)
+
+
+def track_joint_pose_exp(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward tracking a commanded absolute joint pose."""
+  asset: Entity = env.scene[asset_cfg.name]
+  target_joint_pos = env.command_manager.get_command(command_name)
+  current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+  if target_joint_pos.shape != current_joint_pos.shape:
+    raise ValueError(
+      f"Joint pose command shape {target_joint_pos.shape} does not match selected "
+      f"joint shape {current_joint_pos.shape}."
+    )
+  error = torch.mean(
+    torch.square((current_joint_pos - target_joint_pos) / std),
+    dim=1,
+  )
+  return torch.exp(-error)
 
 
 def body_orientation_l2(

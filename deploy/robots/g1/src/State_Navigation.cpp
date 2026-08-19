@@ -76,6 +76,46 @@ REGISTER_OBSERVATION(navigation_phase)
     };
 }
 
+REGISTER_OBSERVATION(navigation_arm_pose_commands)
+{
+    const std::string command_name = params["command_name"].as<std::string>();
+    const std::string target_name = command_name + "_target";
+    const auto command_cfg = env->cfg["commands"][command_name];
+
+    auto command = env->get_command(command_name);
+    auto target = env->get_command(target_name);
+    if (command.empty()) {
+        const std::string default_pose =
+            command_cfg["default_pose"].as<std::string>("down");
+        command = command_cfg["poses"][default_pose].as<std::vector<float>>();
+        target = command;
+        env->set_command(target_name, target);
+    }
+    if (target.empty()) {
+        target = command;
+        env->set_command(target_name, target);
+    }
+    if (command.size() != target.size()) {
+        throw std::runtime_error(
+            "Arm pose command and target must have the same dimension."
+        );
+    }
+
+    const float max_joint_speed =
+        command_cfg["max_joint_speed"].as<float>(0.15f);
+    if (max_joint_speed <= 0.0f) {
+        throw std::runtime_error("Arm pose max_joint_speed must be positive.");
+    }
+    const float max_step = max_joint_speed * env->step_dt;
+    for (size_t i = 0; i < command.size(); ++i) {
+        const float error = target[i] - command[i];
+        command[i] += std::clamp(error, -max_step, max_step);
+    }
+
+    env->set_command(command_name, command);
+    return command;
+}
+
 }  // namespace mdp
 }  // namespace isaaclab
 
@@ -386,6 +426,30 @@ void State_Navigation::process_goal_input()
 
 void State_Navigation::run()
 {
+    const auto arm_pose_cfg = env->cfg["commands"]["arm_pose"];
+    if (arm_pose_cfg && arm_pose_cfg["poses"]) {
+        const auto& joystick = FSMState::lowstate->joystick;
+        std::string requested_pose;
+
+        if (joystick.LB.pressed && joystick.up.on_pressed) {
+            requested_pose = "up";
+        } else if (joystick.LB.pressed && joystick.down.on_pressed) {
+            requested_pose = "down";
+        }
+
+        if (!requested_pose.empty()) {
+            const auto target = arm_pose_cfg["poses"][requested_pose]
+                .as<std::vector<float>>();
+            env->set_command("arm_pose_target", target);
+            spdlog::info(
+                "Navigation arm pose target: {} "
+                "(max joint speed: {:.2f} rad/s)",
+                requested_pose,
+                arm_pose_cfg["max_joint_speed"].as<float>(0.15f)
+            );
+        }
+    }
+
     if (!action_ready) {
         return;
     }

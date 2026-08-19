@@ -1,0 +1,109 @@
+joint_ids_map: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28]
+step_dt: 0.02
+stiffness: [40.2,99.1,40.2,99.1,28.5,28.5,40.2,99.1,40.2,99.1,28.5,28.5,40.2,28.5,28.5,
+            14.3,14.3,14.3,14.3,14.3,16.8,16.8,14.3,14.3,14.3,14.3,14.3,16.8,16.8]
+damping: [2.6,6.3,2.6,6.3,1.8,1.8,2.6,6.3,2.6,6.3,1.8,1.8,2.6,1.8,1.8,
+          0.9,0.9,0.9,0.9,0.9,1.1,1.1,0.9,0.9,0.9,0.9,0.9,1.1,1.1]
+default_joint_pos: [-0.1,0,0,0.3,-0.2,0,-0.1,0,0,0.3,-0.2,0,0,0,0,
+                    0.35,0.18,0,0.87,0,0,0,0.35,-0.18,0,0.87,0,0,0]
+
+commands:
+  navigation:
+    # auto | glim | simulator
+    localization_source: auto
+    odometry_topic: /glim_ros/odom
+    simulator_state_topic: rt/sportmodestate
+    odometry_timeout: 0.5
+    pose_log_enabled: true
+    pose_log_path: log/navigation_pose.csv
+    pose_log_flush_interval: 5
+    prompt_goal_on_entry: true
+    goal_x: 1.0
+    goal_y: 0.0
+    goal_yaw: 0.0
+    stand_off_distance: 0.7
+    camera_forward_offset: 0.05
+    marker_camera_height_offset: -0.054
+    position_control_stiffness: 1.0
+    heading_control_stiffness: 1.0
+    min_approach_speed: 0.35
+    position_tolerance: 0.08
+    heading_tolerance: 0.20
+    ranges:
+      lin_vel_x: [-0.5, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.0, 1.0]
+
+  # The values are the same robust medians used by the training command.
+  arm_pose:
+    default_pose: down
+    max_joint_speed: 0.15
+    poses:
+      down: [0.342673510,0.152991027,-0.005400997,0.886595488,0.000035500,0.004138500,-0.000691500,
+             0.342485487,-0.153674990,0.005297000,0.886597037,-0.000036500,0.004140000,0.000675000]
+      up: [0.195908040,0.062792003,-0.025341000,0.523032963,-0.074189000,-0.679557502,-0.064208046,
+           0.194030464,-0.078599989,0.008975500,0.527265072,0.098191984,-0.679864526,0.092421010]
+
+actions:
+  JointPositionAction:
+    clip: null
+    joint_names: [.*]
+    scale: [0.547546463,0.350661466,0.547546463,0.350661466,0.438577314,0.438577314,
+            0.547546463,0.350661466,0.547546463,0.350661466,0.438577314,0.438577314,
+            0.547546463,0.438577314,0.438577314,
+            0.438577314,0.438577314,0.438577314,0.438577314,0.438577314,0.074500870,0.074500870,
+            0.438577314,0.438577314,0.438577314,0.438577314,0.438577314,0.074500870,0.074500870]
+    offset: [-0.1,0,0,0.3,-0.2,0,-0.1,0,0,0.3,-0.2,0,0,0,0,
+             0.35,0.18,0,0.87,0,0,0,0.35,-0.18,0,0.87,0,0,0]
+    joint_ids: null
+
+# Exact actor order: 3+3+3+6+2+29+29+29+14 = 118.
+observations:
+  base_ang_vel:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0]
+    history_length: 1
+  projected_gravity:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0]
+    history_length: 1
+  navigation_commands:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0]
+    history_length: 1
+  navigation_marker_pose_camera:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0,1.0,1.0,1.0]
+    history_length: 1
+  navigation_phase:
+    params: {period: 0.6}
+    clip: null
+    scale: [1.0,1.0]
+    history_length: 1
+  joint_pos_rel:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+            1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0]
+    history_length: 1
+  joint_vel_rel:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+            1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0]
+    history_length: 1
+  last_action:
+    params: {}
+    clip: null
+    scale: [1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,
+            1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0]
+    history_length: 1
+  navigation_arm_pose_commands:
+    params: {command_name: arm_pose}
+    clip: null
+    scale: [1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0]
+    history_length: 1
