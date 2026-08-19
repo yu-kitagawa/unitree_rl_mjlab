@@ -42,6 +42,7 @@ G1_JOINT_NAMES = (
     "right_wrist_pitch",
     "right_wrist_yaw",
 )
+G1_ARM_JOINT_INDICES = tuple(range(15, 29))
 
 SCALAR_FIELDS = (
     "time_s",
@@ -119,15 +120,10 @@ class NavigationLogTail:
         missing_groups = [
             prefix.rstrip("_")
             for prefix, fields in self.joint_fields.items()
-            if not fields
+            if prefix != "command_joint_" and not fields
         ]
         if missing_groups:
             self.error = "CSV is missing joint groups: " + ", ".join(missing_groups)
-            return False
-
-        joint_counts = {len(fields) for fields in self.joint_fields.values()}
-        if len(joint_counts) != 1:
-            self.error = "Joint groups in CSV have different dimensions"
             return False
 
         self.fieldnames = fieldnames
@@ -241,7 +237,10 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=None,
         metavar="INDEX",
-        help="Joint indices to plot (default: all 29 G1 joints)",
+        help=(
+            "Encoder/action joint indices to plot (default: all 29); "
+            "command shows only matching arm joints"
+        ),
     )
     args = parser.parse_args()
     if args.interval_ms <= 0 or args.max_points <= 1:
@@ -265,7 +264,10 @@ def main() -> None:
             "matplotlib and numpy are required: python3 -m pip install matplotlib numpy"
         ) from exc
 
-    selected_joints = args.joints or list(range(len(G1_JOINT_NAMES)))
+    measured_joint_indices = args.joints or list(range(len(G1_JOINT_NAMES)))
+    command_joint_indices = [
+        index for index in measured_joint_indices if index in G1_ARM_JOINT_INDICES
+    ]
     tail = NavigationLogTail(args.log_file.expanduser().resolve(), args.max_points)
 
     pose_figure, (relative_axis, trajectory_axis) = plt.subplots(
@@ -326,9 +328,9 @@ def main() -> None:
     encoder_axis = joint_axes[1]
     action_axis = joint_axes[2]
 
-    command_axis.set_title("Command joints")
-    encoder_axis.set_title("Encoder joints")
-    action_axis.set_title("Action joints")
+    command_axis.set_title("Command joints (arm pose target)")
+    encoder_axis.set_title("Encoder joints (arms)")
+    action_axis.set_title("Action joints (arms)")
 
     for ax in joint_axes:
         ax.grid(True)
@@ -339,39 +341,51 @@ def main() -> None:
     encoder_lines = []
     action_lines = []
 
-    for joint_index in selected_joints:
+    for joint_index in command_joint_indices:
         command_lines.append(
-            command_axis.plot(
-                [],
-                [],
-                linewidth=1,
-                label=G1_JOINT_NAMES[joint_index],
-            )[0]
+            (
+                joint_index,
+                command_axis.plot(
+                    [],
+                    [],
+                    linewidth=1,
+                    label=G1_JOINT_NAMES[joint_index],
+                )[0],
+            )
         )
 
+    for joint_index in measured_joint_indices:
         encoder_lines.append(
-            encoder_axis.plot(
-                [],
-                [],
-                linewidth=1,
-                label=G1_JOINT_NAMES[joint_index],
-            )[0]
+            (
+                joint_index,
+                encoder_axis.plot(
+                    [],
+                    [],
+                    linewidth=1,
+                    label=G1_JOINT_NAMES[joint_index],
+                )[0],
+            )
         )
 
         action_lines.append(
-            action_axis.plot(
-                [],
-                [],
-                linewidth=1,
-                label=G1_JOINT_NAMES[joint_index],
-            )[0]
+            (
+                joint_index,
+                action_axis.plot(
+                    [],
+                    [],
+                    linewidth=1,
+                    label=G1_JOINT_NAMES[joint_index],
+                )[0],
+            )
         )
 
-    command_axis.legend(
-        ncol=4,
-        fontsize=7,
-        loc="upper right",
-    )
+    for axis, lines in (
+        (command_axis, command_lines),
+        (encoder_axis, encoder_lines),
+        (action_axis, action_lines),
+    ):
+        if lines:
+            axis.legend(ncol=4, fontsize=6, loc="upper right")
 
     joint_status = joint_figure.suptitle(f"Waiting for {tail.path}")
 
@@ -459,25 +473,38 @@ def main() -> None:
             goal_marker.set_data([], [])
             goal_heading.set_data([], [])
 
-        command_fields = tail.joint_fields["command_joint_"]
-        encoder_fields = tail.joint_fields["encoder_joint_"]
-        action_fields = tail.joint_fields["action_joint_"]
+        command_fields = {
+            tail._joint_sort_key(field): field
+            for field in tail.joint_fields["command_joint_"]
+        }
+        encoder_fields = {
+            tail._joint_sort_key(field): field
+            for field in tail.joint_fields["encoder_joint_"]
+        }
+        action_fields = {
+            tail._joint_sort_key(field): field
+            for field in tail.joint_fields["action_joint_"]
+        }
 
-        for i, joint_index in enumerate(selected_joints):
-
-            command_lines[i].set_data(
-                time_s,
-                data[command_fields[joint_index]],
+        for joint_index, line in command_lines:
+            command_field = command_fields.get(joint_index)
+            line.set_data(
+                time_s if command_field else [],
+                data[command_field] if command_field else [],
             )
 
-            encoder_lines[i].set_data(
-                time_s,
-                data[encoder_fields[joint_index]],
+        for joint_index, line in encoder_lines:
+            encoder_field = encoder_fields.get(joint_index)
+            line.set_data(
+                time_s if encoder_field else [],
+                data[encoder_field] if encoder_field else [],
             )
 
-            action_lines[i].set_data(
-                time_s,
-                data[action_fields[joint_index]],
+        for joint_index, line in action_lines:
+            action_field = action_fields.get(joint_index)
+            line.set_data(
+                time_s if action_field else [],
+                data[action_field] if action_field else [],
             )
 
         for axis in joint_axes:

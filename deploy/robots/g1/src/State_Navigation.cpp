@@ -220,6 +220,61 @@ State_Navigation::State_Navigation(int state_mode, std::string state_string)
         policy_dir / "exported" / "policy.onnx"
     );
 
+    const auto arm_pose_cfg = deploy_cfg["commands"]["arm_pose"];
+    if (arm_pose_cfg && arm_pose_cfg["poses"]) {
+        const std::string default_pose =
+            arm_pose_cfg["default_pose"].as<std::string>("down");
+        const auto default_target = arm_pose_cfg["poses"][default_pose]
+            .as<std::vector<float>>();
+        if (arm_pose_cfg["joint_ids"]) {
+            arm_command_joint_ids =
+                arm_pose_cfg["joint_ids"].as<std::vector<int>>();
+        } else if (default_target.size() <= env->robot->data.joint_ids_map.size()) {
+            // G1 arm joints occupy the trailing policy-order entries. This
+            // fallback keeps older arm policy configs usable, while an
+            // explicit joint_ids list remains preferable.
+            const int first_arm_joint = static_cast<int>(
+                env->robot->data.joint_ids_map.size() - default_target.size()
+            );
+            for (std::size_t i = 0; i < default_target.size(); ++i) {
+                arm_command_joint_ids.push_back(
+                    first_arm_joint + static_cast<int>(i)
+                );
+            }
+        }
+
+        if (arm_command_joint_ids.size() != default_target.size()) {
+            throw std::runtime_error(
+                "arm_pose joint_ids and pose targets must have the same dimension."
+            );
+        }
+        std::vector<bool> used_joint_ids(
+            env->robot->data.joint_ids_map.size(), false
+        );
+        for (const int joint_id : arm_command_joint_ids) {
+            if (joint_id < 0 ||
+                joint_id >= static_cast<int>(used_joint_ids.size()) ||
+                used_joint_ids[joint_id]) {
+                throw std::runtime_error(
+                    "arm_pose joint_ids must be unique valid policy-order indices."
+                );
+            }
+            used_joint_ids[joint_id] = true;
+        }
+        for (const auto& pose : arm_pose_cfg["poses"]) {
+            if (pose.second.as<std::vector<float>>().size() !=
+                arm_command_joint_ids.size()) {
+                throw std::runtime_error(
+                    "Every arm_pose target must match arm_pose joint_ids."
+                );
+            }
+        }
+        spdlog::info(
+            "Navigation command-joint telemetry: {} arm joints.",
+            arm_command_joint_ids.size()
+        );
+    }
+
     registered_checks.emplace_back(std::make_pair(
         [&]() -> bool { return isaaclab::mdp::bad_orientation(env.get(), 1.0); },
         FSMStringMap.right.at("Passive")
@@ -309,7 +364,8 @@ void State_Navigation::enter()
             {
                 std::lock_guard<std::mutex> lock(joint_command_mutex);
                 latest_policy_action = env->action_manager->action();
-                latest_command_joints = env->action_manager->processed_actions();
+                latest_processed_action_joints =
+                    env->action_manager->processed_actions();
             }
             action_ready = true;
 
@@ -454,7 +510,7 @@ void State_Navigation::run()
         return;
     }
     std::lock_guard<std::mutex> lock(joint_command_mutex);
-    const auto& action = latest_command_joints;
+    const auto& action = latest_processed_action_joints;
     if (action.size() != env->robot->data.joint_ids_map.size()) {
         return;
     }
@@ -645,7 +701,7 @@ void State_Navigation::reset_navigation_state()
             env->robot->data.joint_ids_map.size(),
             std::numeric_limits<float>::quiet_NaN()
         );
-        latest_command_joints.assign(
+        latest_processed_action_joints.assign(
             env->robot->data.joint_ids_map.size(),
             std::numeric_limits<float>::quiet_NaN()
         );
@@ -907,8 +963,10 @@ void State_Navigation::open_pose_log()
     for (std::size_t i = 0; i < joint_count; ++i) {
         pose_log << ",policy_action_joint_" << std::setw(2) << std::setfill('0') << i;
     }
-    for (std::size_t i = 0; i < joint_count; ++i) {
-        pose_log << ",command_joint_" << std::setw(2) << std::setfill('0') << i;
+    for (const int joint_id : arm_command_joint_ids) {
+        pose_log
+            << ",command_joint_"
+            << std::setw(2) << std::setfill('0') << joint_id;
     }
     for (std::size_t i = 0; i < joint_count; ++i) {
         pose_log << ",encoder_joint_" << std::setw(2) << std::setfill('0') << i;
@@ -953,12 +1011,13 @@ void State_Navigation::write_pose_log(
     const auto encoder_joints = env->robot->data.joint_pos;
     const auto projected_gravity = env->robot->data.projected_gravity_b;
     std::vector<float> policy_action;
-    std::vector<float> command_joints;
+    // command_joints is the arm-pose target selected by the deploy input
+    // (L1 + Up/Down), not the policy's processed full-body action.
+    const auto command_joints = env->get_command("arm_pose_target");
     std::vector<float> action_joints;
     {
         std::lock_guard<std::mutex> lock(joint_command_mutex);
         policy_action = latest_policy_action;
-        command_joints = latest_command_joints;
         action_joints = last_sent_action_joints;
     }
     pose_log
@@ -1009,7 +1068,9 @@ void State_Navigation::write_pose_log(
         }
     };
     write_joint_values(policy_action);
-    write_joint_values(command_joints);
+    for (std::size_t i = 0; i < arm_command_joint_ids.size(); ++i) {
+        pose_log << ',' << (i < command_joints.size() ? command_joints[i] : nan);
+    }
     write_joint_values(encoder_joints);
     write_joint_values(action_joints);
     pose_log << '\n';

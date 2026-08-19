@@ -101,8 +101,9 @@ private:
 
     mutable std::mutex joint_command_mutex;
     std::vector<float> latest_policy_action;
-    std::vector<float> latest_command_joints;
+    std::vector<float> latest_processed_action_joints;
     std::vector<float> last_sent_action_joints;
+    std::vector<int> arm_command_joint_ids;
 
     Eigen::Vector2f estimated_position{Eigen::Vector2f::Zero()};
     Eigen::Vector2f initial_odometry_position{Eigen::Vector2f::Zero()};

@@ -290,24 +290,28 @@ python3 scripts/plot_deploy_navigation.py
 
 Each Navigation entry truncates and then streams
 `deploy/robots/g1/log/navigation_pose.csv` at the policy rate. The CSV contains
-the relative-position and velocity commands, raw policy actions, processed
-joint commands, encoder joints, joint targets actually written to LowCmd,
+the relative-position and velocity commands, raw policy actions, commanded arm
+pose targets, encoder joints, joint targets actually written to LowCmd,
 projected gravity, and the localization position/quaternion. The
 `slam_pose_*` columns contain GLIM odometry on the real robot and MuJoCo truth
 in sim2sim; use the `source` column (`glim` or `simulator`) to distinguish them.
-Quaternion columns are ordered `qx,qy,qz,qw`. `command_joint_*` is the
-processed policy target in policy joint order, while `action_joint_*` is the
-last exact `q` value written to the mapped LowCmd motor entry. Unavailable data
-is written as `nan` without stopping the other telemetry.
+Quaternion columns are ordered `qx,qy,qz,qw`. `command_joint_15` through
+`command_joint_28` are the 14 arm-pose target angles selected by the deploy
+`L1 + Up/Down` input. They are intentionally not the policy's processed
+full-body output. `action_joint_*` is the last exact `q` value written to the
+mapped LowCmd motor entry. Encoder/action columns remain available for all 29
+joints. Unavailable data is written as `nan` without stopping the other
+telemetry.
 
 The plotter opens a pose window and a joint window. The pose window shows
 `command_rel_pos` approaching zero and the localization pose projected onto an
-XY plane with heading markers. Every G1 joint is shown in a small subplot with
-`command_joints`, `encoder_joints`, and `action_joints` overlaid. To display
-only selected joints, pass their policy-order indices, for example:
+XY plane with heading markers. In the joint window, `command_joints` shows the
+14 commanded arm joints, while `encoder_joints` and `action_joints` show all 29
+G1 joints. To filter the encoder/action plots, pass joint indices; the command
+plot then shows only arm joints contained in that selection. For example:
 
 ```bash
-python3 scripts/plot_deploy_navigation.py --joints 0 3 6 9 12
+python3 scripts/plot_deploy_navigation.py --joints 15 18 22 25
 ```
 
 The title reports whether the data source is `simulator` or `glim`; missing or

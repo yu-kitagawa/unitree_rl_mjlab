@@ -38,6 +38,8 @@ commands:
   arm_pose:
     default_pose: down
     max_joint_speed: 0.15
+    # Policy-order G1 arm joint indices corresponding to every pose value.
+    joint_ids: [15,16,17,18,19,20,21,22,23,24,25,26,27,28]
     poses:
       down: [0.342673510,0.152991027,-0.005400997,0.886595488,0.000035500,0.004138500,-0.000691500,
              0.342485487,-0.153674990,0.005297000,0.886597037,-0.000036500,0.004140000,0.000675000]
