@@ -9,6 +9,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
 from .velocity_command import GoalPoseCommand
+from .trajectory_command import TrajectoryCommand
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -76,3 +77,22 @@ def target_pose_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
   """Desired stand-off SE(2) pose relative to the robot base."""
   command = cast(GoalPoseCommand, env.command_manager.get_term(command_name))
   return command.target_pose_b
+
+
+def future_path_poses(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """Future path poses in the current noisy robot frame.
+
+  Each configured lookahead contributes ``(x, y, cos(theta), sin(theta))``.
+  """
+  command = cast(TrajectoryCommand, env.command_manager.get_term(command_name))
+  return command.future_pose_b
+
+
+def future_path_poses_ground_truth(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """Ground-truth future path poses reserved for the privileged critic."""
+  command = cast(TrajectoryCommand, env.command_manager.get_term(command_name))
+  return command.future_pose_b_ground_truth

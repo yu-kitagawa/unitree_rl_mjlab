@@ -80,14 +80,13 @@ int main(int argc, char** argv)
 
     std::cout << "Press [L2 + Up] to enter FixStand mode.\n";
     std::cout << "And then press [R2 + A] to start controlling the robot.\n";
-    std::cout << "Press [R2 + B], then enter Navigation goal x y yaw_rad in this terminal.\n";
+    std::cout << "Press [R2 + B] to follow a newly generated Navigation path.\n";
     std::cout << "Press [R2 + A] to return from Navigation to Velocity.\n";
     std::cout << "In arm-enabled Navigation, press [L1 + Up/Down] to raise/lower the arms.\n";
     std::cout << "And then press [R1 + A/B/Y/X] to control the robot dance.\n";
 
     while (true)
     {
-        State_Navigation::instance()->process_goal_input();
         usleep(10000);
     }
     

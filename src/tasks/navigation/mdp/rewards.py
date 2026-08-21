@@ -14,6 +14,7 @@ from mjlab.utils.lab_api.string import (
 )
 
 from .velocity_command import GoalPoseCommand
+from .trajectory_command import TrajectoryCommand
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -66,6 +67,45 @@ def constellation_reward(
     constellation_distance
   )
   return torch.exp(-decay * constellation_distance)
+
+
+def path_progress_constellation_reward(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  decay: float = 0.2,
+  constellation_radius: float = 1.0,
+) -> torch.Tensor:
+  """Reward signed path progress plus SE(2) alignment to the closest point."""
+  command = cast(
+    TrajectoryCommand, env.command_manager.get_term(command_name)
+  )
+  command.update_path_tracking()
+
+  position_distance_sq = command.distance_to_path.square()
+  orientation_distance = (
+    2.0
+    * constellation_radius**2
+    * (1.0 - torch.cos(command.path_heading_error))
+  )
+  constellation_distance = position_distance_sq + orientation_distance
+  constellation = torch.exp(-decay * constellation_distance)
+
+  env.extras["log"]["Metrics/path_step_progress"] = torch.mean(
+    command.step_progress
+  )
+  env.extras["log"]["Metrics/path_progress"] = torch.mean(
+    command.closest_progress
+  )
+  env.extras["log"]["Metrics/path_distance"] = torch.mean(
+    command.distance_to_path
+  )
+  env.extras["log"]["Metrics/path_heading_error"] = torch.mean(
+    torch.abs(command.path_heading_error)
+  )
+  env.extras["log"]["Metrics/path_constellation_distance"] = torch.mean(
+    constellation_distance
+  )
+  return command.step_progress + constellation
 
 
 def goal_stillness_reward(

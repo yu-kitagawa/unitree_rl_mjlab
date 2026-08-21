@@ -80,6 +80,7 @@ class NavigationLogTail:
         self.numeric_fields: list[str] = []
         self.joint_fields: dict[str, list[str]] = {}
         self.values: dict[str, deque[float] | deque[str]] = {}
+        self.navigation_origin: tuple[float, float, float] | None = None
         self.error = "Waiting for Navigation CSV log"
         self._clear_values()
 
@@ -95,6 +96,7 @@ class NavigationLogTail:
         self.fieldnames = None
         self.numeric_fields = []
         self.joint_fields = {}
+        self.navigation_origin = None
         self._clear_values()
 
     @staticmethod
@@ -202,14 +204,69 @@ class NavigationLogTail:
             for field, value in parsed.items():
                 self.values[field].append(value)
             self.values["source"].append(row["source"])
+            if self.navigation_origin is None and bool(
+                parsed["localization_available"]
+            ):
+                candidate_origin = (
+                    parsed["slam_pose_x_m"],
+                    parsed["slam_pose_y_m"],
+                    parsed["slam_pose_theta_rad"],
+                )
+                if all(math.isfinite(value) for value in candidate_origin):
+                    self.navigation_origin = candidate_origin
 
         if self.values["time_s"]:
             self.error = ""
 
 
+class TargetPathLog:
+    """Reload the generated target path whenever Navigation rewrites it."""
+
+    REQUIRED_FIELDS = ("time_s", "x_m", "y_m", "yaw_rad", "is_goal")
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.signature: tuple[int, int, int] | None = None
+        self.values: dict[str, list[float]] = {
+            field: [] for field in self.REQUIRED_FIELDS
+        }
+        self.error = f"Waiting for {path}"
+
+    def poll(self) -> None:
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            self.error = f"Waiting for {self.path}"
+            return
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if signature == self.signature:
+            return
+        try:
+            with self.path.open("r", encoding="utf-8", newline="") as stream:
+                reader = csv.DictReader(stream)
+                if reader.fieldnames is None or not set(self.REQUIRED_FIELDS).issubset(
+                    reader.fieldnames
+                ):
+                    self.error = "Target path CSV has an incompatible header"
+                    return
+                values = {field: [] for field in self.REQUIRED_FIELDS}
+                for row in reader:
+                    for field in self.REQUIRED_FIELDS:
+                        values[field].append(float(row[field]))
+        except (OSError, ValueError) as exc:
+            self.error = f"Cannot read Navigation target path CSV: {exc}"
+            return
+        self.values = values
+        self.signature = signature
+        self.error = "" if values["time_s"] else "Target path CSV is empty"
+
+
 def parse_args() -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parents[1]
     default_log = repo_root / "deploy/robots/g1/log/navigation_pose.csv"
+    default_target_path = (
+        repo_root / "deploy/robots/g1/log/navigation_target_path.csv"
+    )
     parser = argparse.ArgumentParser(
         description="Live plots of G1 Navigation commands, joints, and pose."
     )
@@ -224,6 +281,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=200,
         help="Plot refresh interval in milliseconds (default: 200)",
+    )
+    parser.add_argument(
+        "--target-path-file",
+        type=Path,
+        default=default_target_path,
+        help=f"Generated target path CSV (default: {default_target_path})",
     )
     parser.add_argument(
         "--max-points",
@@ -269,6 +332,7 @@ def main() -> None:
         index for index in measured_joint_indices if index in G1_ARM_JOINT_INDICES
     ]
     tail = NavigationLogTail(args.log_file.expanduser().resolve(), args.max_points)
+    target_path = TargetPathLog(args.target_path_file.expanduser().resolve())
 
     pose_figure, (relative_axis, trajectory_axis) = plt.subplots(
         1, 2, figsize=(14, 6), constrained_layout=True
@@ -291,7 +355,17 @@ def main() -> None:
     relative_lines = [relative_x_line, relative_y_line, distance_line, relative_yaw_line]
     relative_axis.legend(relative_lines, [line.get_label() for line in relative_lines])
 
-    (trajectory_line,) = trajectory_axis.plot([], [], label="pose path", color="tab:blue")
+    (trajectory_line,) = trajectory_axis.plot(
+        [], [], label="robot path", color="tab:blue"
+    )
+    (target_path_line,) = trajectory_axis.plot(
+        [],
+        [],
+        label="target path",
+        color="tab:green",
+        linestyle="--",
+        linewidth=2.0,
+    )
     MAX_ARROWS = 20
 
     theta_quiver = trajectory_axis.quiver(
@@ -391,6 +465,7 @@ def main() -> None:
 
     def update(_frame: int):
         tail.poll()
+        target_path.poll()
         if not tail.values.get("time_s"):
             message = tail.error or f"Waiting for samples in {tail.path}"
             pose_status.set_text(message)
@@ -415,9 +490,35 @@ def main() -> None:
         valid_pose = np.flatnonzero(
             np.isfinite(slam_x) & np.isfinite(slam_y) & np.isfinite(slam_theta)
         )
+        target_world_x = np.asarray([], dtype=float)
+        target_world_y = np.asarray([], dtype=float)
         if valid_pose.size:
             first = valid_pose[0]
-            start_marker.set_data([slam_x[first]], [slam_y[first]])
+            origin_x, origin_y, origin_yaw = tail.navigation_origin or (
+                slam_x[first],
+                slam_y[first],
+                slam_theta[first],
+            )
+            start_marker.set_data([origin_x], [origin_y])
+
+            target_local_x = np.asarray(target_path.values["x_m"], dtype=float)
+            target_local_y = np.asarray(target_path.values["y_m"], dtype=float)
+            if target_local_x.size:
+                cos_start = math.cos(origin_yaw)
+                sin_start = math.sin(origin_yaw)
+                target_world_x = (
+                    origin_x
+                    + cos_start * target_local_x
+                    - sin_start * target_local_y
+                )
+                target_world_y = (
+                    origin_y
+                    + sin_start * target_local_x
+                    + cos_start * target_local_y
+                )
+                target_path_line.set_data(target_world_x, target_world_y)
+            else:
+                target_path_line.set_data([], [])
 
             arrow_count = min(MAX_ARROWS, valid_pose.size)
 
@@ -458,11 +559,11 @@ def main() -> None:
 
             goal_x_local = data["goal_x_m"][-1]
             goal_y_local = data["goal_y_m"][-1]
-            cos_start = math.cos(slam_theta[first])
-            sin_start = math.sin(slam_theta[first])
-            goal_x = slam_x[first] + cos_start * goal_x_local - sin_start * goal_y_local
-            goal_y = slam_y[first] + sin_start * goal_x_local + cos_start * goal_y_local
-            goal_theta = slam_theta[first] + data["goal_yaw_rad"][-1]
+            cos_start = math.cos(origin_yaw)
+            sin_start = math.sin(origin_yaw)
+            goal_x = origin_x + cos_start * goal_x_local - sin_start * goal_y_local
+            goal_y = origin_y + sin_start * goal_x_local + cos_start * goal_y_local
+            goal_theta = origin_yaw + data["goal_yaw_rad"][-1]
             goal_marker.set_data([goal_x], [goal_y])
             goal_heading.set_data(
                 [goal_x, goal_x + 0.18 * math.cos(goal_theta)],
@@ -472,6 +573,7 @@ def main() -> None:
             start_marker.set_data([], [])
             goal_marker.set_data([], [])
             goal_heading.set_data([], [])
+            target_path_line.set_data([], [])
 
         command_fields = {
             tail._joint_sort_key(field): field
@@ -523,6 +625,10 @@ def main() -> None:
             valid_x = slam_x[valid_pose]
             valid_y = slam_y[valid_pose]
 
+            if target_world_x.size:
+                valid_x = np.concatenate((valid_x, target_world_x))
+                valid_y = np.concatenate((valid_y, target_world_y))
+
             margin = 0.2
 
             xmin = np.min(valid_x) - margin
@@ -536,6 +642,7 @@ def main() -> None:
             half_range = max(
                 (xmax - xmin) / 2.0,
                 (ymax - ymin) / 2.0,
+                0.2,
             )
 
             trajectory_axis.set_xlim(

@@ -1,75 +1,79 @@
-# G1 29-DoF object-front navigation
+# G1 29-DoF trajectory navigation
 
-このタスクは既存の `velocity` タスクを低レベル歩行器として残し、頭部
-カメラで観測したArUcoマーカーの前まで移動する目標条件付きタスクです。
+このタスクは既存の `velocity` タスクの歩容・正則化・sim-to-real設定を残し、
+ランダムに生成したSE(2)軌道を追従するnavigationタスクです。
 
-## タスクの定義
+## 軌道生成
 
-- 物体はロボット前方の距離 `0.8–3.0 m`、方位 `±1.2 rad` の範囲で配置
-  されます（学習初期はカリキュラムにより狭い範囲）。
-- ArUco面はロボット側を向きます。
-- 目標ロボット姿勢は物体から `0.7 m` 手前で、物体の方向を向く姿勢です。
-- 目標は `4–8 s` ごとに更新されます。
-- 腕姿勢は各episodeのreset時に上/下を同確率で選び、そのepisode中は固定します。
+軌道は制御周期 `0.02 s` ごとに離散化し、4秒ごとに現在のロボット姿勢を
+原点として生成します。
 
-頭部カメラ基準のActor観測 `marker_pose_camera` は次の6要素です。
+- 移動区間: 3秒
+- 終端での停止保持: 1秒
+- 曲率一定区間数: 1〜3
+- 各区間の最短時間: 0.7秒
+- 最小旋回半径: 0.15 m
+- 直線区間の確率: 5%
+- SE(2)速度: 0.20〜0.70
+- 始動・停止ramp: 各0.8秒
 
-```text
-[x, y, z, distance, sin(relative_yaw), cos(relative_yaw)]
-```
-
-カメラ座標は `+x: 前、+y: 左、+z: 上` です。実機ではLiDAR自己位置推定と
-ArUco姿勢推定から同じ量を生成してください。角度を `sin/cos` にしているのは
-`-pi/pi` 境界で観測が不連続になるのを避けるためです。
-
-学習時は自己位置推定・ArUco検出のレイテンシを再現するため、各envのreset時に
-`0〜0.5 s` の観測遅延を独立にサンプルします。既定の制御周期は `0.02 s`
-なので `0〜25 step` に相当し、そのenvのエピソード中は同じ遅延を保持します。
-Actorの `marker_pose_camera` のみが遅延し、Criticには現在値を渡します。
-play設定ではこの遅延を無効にしています。
-
-Actor/Criticには左右の肩・肘・手首14関節の目標姿勢 `arm_pose` も追加します。
-姿勢は `arm_vel` と同じ `arm_down.npz` / `arm_up.npz` の歩行区間から中央値を
-取り出しています。従来の姿勢報酬は下半身と腰だけに適用し、腕には独立した
-目標姿勢追従報酬を適用します。
-
-自己位置推定の平面位置には、各env・各制御stepでゼロ平均ガウスノイズを
-加えます。通常99%は標準偏差 `0.01 m`、機器誤作動を表す残り1%は標準偏差
-`1.0 m` です。1%判定はx/y成分ごとではなく、一つの自己位置取得に対して
-一度だけ行い、選ばれた標準偏差からx/yを独立にサンプルします。同じ誤差を
-Actorの `marker_pose_camera` と目標速度指令へ共通適用し、距離成分はノイズ
-適用後の位置から再計算します。Critic、報酬、評価指標は真値を使用します。
-長さで指定されたノイズのためyawには適用しません。この自己位置ノイズは
-学習・playの両方で有効です。制御周期50 Hzで取得ごとに1%を判定するため、
-各envでは平均約2秒に1回の外れ値が発生します。
-
-## 目標指令と報酬
-
-目標誤差には比例制御を適用し、元のvelocityタスクと同じ
-`(vx, vy, wz)` 指令へ変換します。このため、velocityの速度追従、姿勢、周期、
-足上げ、滑り、着地、関節平滑化の各報酬はそのまま有効です。
-
-論文の式(5)は `constellation_reward` として追加しています。半径 `r` の円形
-constellationでは、
+各区間では曲率 `kappa` と進行距離 `s` から、数値的に安定なsinc形式で
+局所姿勢を積分します。
 
 ```text
-d_con = ||p - p_goal||^2 + 2 r^2 (1 - cos(yaw - yaw_goal))
-r_con = exp(-w_c d_con)
+phi   = kappa * s
+x     = s * sinc(phi / pi)
+y     = 0.5 * s * phi * sinc(phi / (2 pi))^2
+theta = phi
 ```
 
-で、既定値は論文と同じ `r=1.0 m`, `w_c=0.2` です。位置と向きを別々に加算
-するのではなく、一つの幾何誤差として同時に小さくします。
+episodeの10%は停止軌道として生成し、静止動作も同時に学習します。
 
-位置誤差 `0.08 m`、向き誤差 `0.20 rad` の両方を満たすと到達状態がラッチ
-され、回復半径内では速度指令を完全にゼロへ固定します。位置到達後は
-`goal_stillness` 報酬により、ベース並進・回転速度と全関節速度をゼロへ
-近づけます。
+## 軌道観測
 
-球体の外では、比例制御で生成した並進速度に `0.35 m/s` の下限を設けて
-いるため、目標直前でも減速し続けることはありません。実際に球体へ入った
-stepで位置到達をラッチし、並進速度指令を直接ゼロへ切り替えます。到達後に
-`0.10 m` より外へ流れた場合だけラッチを解除して再接近します。この
-ヒステリシスにより、8 cm境界付近の微小振動では再発進しません。
+Actorには現在の推定自己位置から見た1秒後・2秒後の経路姿勢を追加します。
+各姿勢は次の4要素で、合計8要素です。
+
+```text
+[x, y, cos(theta), sin(theta)] × 2
+```
+
+`x, y, theta`は現在のロボットbody座標系基準です。角度をcos/sinにすることで
+`-pi/pi`境界の不連続を避けます。Criticには同じ形式の真値を渡します。
+
+学習時のActor観測には、自己位置推定を再現する `0〜0.5 s` のepisode固定遅延を
+適用します。平面位置には各制御stepでゼロ平均ガウスノイズを加え、通常99%は
+標準偏差 `0.01 m`、残り1%は機器誤作動として標準偏差 `1.0 m` とします。
+yawには位置ノイズを加えません。playでは遅延のみ無効化し、位置ノイズは維持します。
+
+Actor観測は、従来のマーカー6要素を軌道8要素へ置き換えたため、腕目標14要素を
+含めて120次元です。
+
+## 指令と報酬
+
+`twist`指令は最終ゴールへの比例制御ではなく、現在時刻の経路姿勢と接線速度から
+生成します。接線速度へ現在の経路姿勢誤差を `tracking_gain=3.0` で補正し、body座標系へ
+変換します。このため外乱から経路へ復帰できますが、最終点へ一直線に向かう指令は
+生成されません。
+
+navigation固有の `path_tracking` 報酬は、指定された次の2項をそのまま加算します。
+
+```text
+r_progress = s_closest(t) - s_closest(t - 1)
+
+d_con = ||p - p_closest||^2
+        + 2 r^2 (1 - cos(theta - theta_closest))
+r_constellation = exp(-w_c * d_con)
+
+r_path = r_progress + r_constellation
+```
+
+最近点は折れ線化した軌道の全区間へ射影して求めます。始点より後ろへずれた場合も
+進行量を連続に評価できるよう、最初の曲率を使った後方延長を探索対象に含めます。
+既定値は `r=1.0 m`, `w_c=0.2` です。負方向へ進むと `r_progress` も負になります。
+
+velocityタスク由来の速度追従、姿勢、周期、足上げ、滑り、着地、関節平滑化の報酬は
+引き続き有効です。腕姿勢はepisodeごとに上/下を同確率で選び、そのepisode中は固定します。
 
 ## 実行
 
@@ -85,27 +89,28 @@ python scripts/play.py Unitree-G1-Navigation-Flat \
   --checkpoint_file=logs/rsl_rl/g1_navigation/<run>/model_<iteration>.pt
 ```
 
-腕条件付きActorの入力は従来の104次元に腕目標14次元を加えた118次元です。
-deployでは学習済みONNXを次へ配置すると、既存の`v0`より`v1_arm`が優先されます。
+入力が118次元から120次元へ変わったため、既存のnavigationチェックポイントは
+読み込めません。新規にtrainしてください。
+
+deploy用の修正済120次元設定は `navigation/v2_path` にあります。
+修正後に新規trainしたONNXだけを使用してください。
 
 ```bash
-mkdir -p deploy/robots/g1/config/policy/navigation/v1_arm/exported
-cp logs/rsl_rl/g1_navigation/<run>/policy.onnx \
-  deploy/robots/g1/config/policy/navigation/v1_arm/exported/policy.onnx
+mkdir -p deploy/robots/g1/config/policy/navigation/v2_path/exported
+cp logs/rsl_rl/g1_navigation/<run>/policy.onnx deploy/robots/g1/config/policy/navigation/v2_path/exported/policy.onnx
 ```
 
-Navigation実行中は`L1 + Up`で腕上げ、`L1 + Down`で腕下げへ切り替えます。
-目標は`0.15 rad/s`を上限として補間され、急な姿勢変更を避けます。
+Navigationへ入るたびにランダム経路を1本生成し、その終端をゴールとして保持します。
+実軌跡は `navigation_pose.csv`、全目標経路は `navigation_target_path.csv` に出力され、
+`scripts/plot_deploy_navigation.py`で重ねて確認できます。
 
-主要な調整箇所は以下です。
+主要な調整箇所は `TrajectoryCommandCfg` の次の値です。
 
-- 停止距離: `GoalPoseCommandCfg.stand_off_distance`
-- 目標範囲: `GoalPoseCommandCfg.Ranges.object_distance/object_bearing`
-- 目標速度: `position_control_stiffness`, `heading_control_stiffness`,
-  `min_approach_speed`, `position_recovery_tolerance`, `lin_vel_x`,
-  `lin_vel_y`, `ang_vel_z`
-- 自己位置ノイズ: `localization_noise_enabled`,
-  `localization_position_noise_std`, `localization_outlier_probability`,
-  `localization_outlier_position_std`
-- constellation報酬: `decay`, `constellation_radius`, termの`weight`
-- 腕姿勢: `_add_episode_arm_pose_task`のmotion区間、sampling weight、追従報酬
+- 参照時間: `reference_times`
+- 軌道時間: `motion_duration`, `stop_hold_duration`
+- 軌道形状: `num_segments_range`, `min_segment_duration`, `min_radius`,
+  `straight_probability`, `curvature_exponent`
+- 速度・追従補正: `se2_speed_range`, `characteristic_length`, `tracking_gain`
+- 自己位置ノイズ: `localization_position_noise_std`,
+  `localization_outlier_probability`, `localization_outlier_position_std`
+- constellation: `path_tracking`報酬の`decay`, `constellation_radius`

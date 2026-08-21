@@ -6,7 +6,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
-#include <sstream>
+#include <numeric>
 #include <stdexcept>
 
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
@@ -27,6 +27,22 @@ std::array<float, 2> read_range(
         return fallback;
     }
     return {node[0].as<float>(), node[1].as<float>()};
+}
+
+std::array<int, 2> read_int_range(
+    const YAML::Node& node,
+    const std::array<int, 2>& fallback)
+{
+    if (!node || !node.IsSequence() || node.size() != 2) {
+        return fallback;
+    }
+    return {node[0].as<int>(), node[1].as<int>()};
+}
+
+float smoothstep(float ratio)
+{
+    ratio = std::clamp(ratio, 0.0f, 1.0f);
+    return ratio * ratio * (3.0f - 2.0f * ratio);
 }
 
 float quaternion_heading(const Eigen::Quaternionf& quat)
@@ -54,6 +70,13 @@ REGISTER_OBSERVATION(navigation_marker_pose_camera)
     (void)env;
     (void)params;
     return State_Navigation::instance()->marker_observation();
+}
+
+REGISTER_OBSERVATION(navigation_future_path_poses)
+{
+    (void)env;
+    (void)params;
+    return State_Navigation::instance()->future_path_observation();
 }
 
 REGISTER_OBSERVATION(navigation_phase)
@@ -145,27 +168,80 @@ State_Navigation::State_Navigation(int state_mode, std::string state_string)
     pose_log_path = nav_cfg["pose_log_path"].as<std::string>(
         pose_log_path.string()
     );
+    target_path_log_path = nav_cfg["target_path_log_path"].as<std::string>(
+        target_path_log_path.string()
+    );
     pose_log_flush_interval = nav_cfg["pose_log_flush_interval"].as<std::size_t>(
         pose_log_flush_interval
     );
     odometry_timeout = nav_cfg["odometry_timeout"].as<float>(odometry_timeout);
-    goal.position.x() = nav_cfg["goal_x"].as<float>(goal.position.x());
-    goal.position.y() = nav_cfg["goal_y"].as<float>(goal.position.y());
-    goal.yaw = nav_cfg["goal_yaw"].as<float>(goal.yaw);
-    prompt_goal_on_entry = nav_cfg["prompt_goal_on_entry"].as<bool>(
-        prompt_goal_on_entry
+    const auto configured_trajectory = nav_cfg["trajectory"];
+    const YAML::Node trajectory_cfg = configured_trajectory
+        ? configured_trajectory
+        : YAML::Node(YAML::NodeType::Map);
+    reference_times = read_range(
+        trajectory_cfg["reference_times"], reference_times
     );
+    motion_duration = trajectory_cfg["motion_duration"].as<float>(
+        motion_duration
+    );
+    stop_hold_duration = trajectory_cfg["stop_hold_duration"].as<float>(
+        stop_hold_duration
+    );
+    start_ramp_duration = trajectory_cfg["start_ramp_duration"].as<float>(
+        start_ramp_duration
+    );
+    stop_ramp_duration = trajectory_cfg["stop_ramp_duration"].as<float>(
+        stop_ramp_duration
+    );
+    num_segments_range = read_int_range(
+        trajectory_cfg["num_segments_range"], num_segments_range
+    );
+    min_segment_duration = trajectory_cfg["min_segment_duration"].as<float>(
+        min_segment_duration
+    );
+    min_radius = trajectory_cfg["min_radius"].as<float>(min_radius);
+    straight_probability = trajectory_cfg["straight_probability"].as<float>(
+        straight_probability
+    );
+    curvature_exponent = trajectory_cfg["curvature_exponent"].as<float>(
+        curvature_exponent
+    );
+    se2_speed_range = read_range(
+        trajectory_cfg["se2_speed_range"], se2_speed_range
+    );
+    characteristic_length = trajectory_cfg["characteristic_length"].as<float>(
+        characteristic_length
+    );
+    tracking_gain = trajectory_cfg["tracking_gain"].as<float>(tracking_gain);
+    max_linear_speed = trajectory_cfg["max_linear_speed"].as<float>(
+        max_linear_speed
+    );
+    max_angular_speed = trajectory_cfg["max_angular_speed"].as<float>(
+        max_angular_speed
+    );
+    standing_probability = trajectory_cfg["standing_probability"].as<float>(
+        standing_probability
+    );
+    trajectory_seed = trajectory_cfg["random_seed"].as<unsigned int>(
+        trajectory_seed
+    );
+    trajectory_step_dt = deploy_cfg["step_dt"].as<float>(trajectory_step_dt);
+
+    // These values are only used when an older marker-observation policy is
+    // selected during migration to the 120-input trajectory actor.
     stand_off_distance = nav_cfg["stand_off_distance"].as<float>(stand_off_distance);
     camera_forward_offset = nav_cfg["camera_forward_offset"].as<float>(camera_forward_offset);
     marker_camera_height_offset = nav_cfg["marker_camera_height_offset"].as<float>(marker_camera_height_offset);
-    position_control_stiffness = nav_cfg["position_control_stiffness"].as<float>(position_control_stiffness);
-    heading_control_stiffness = nav_cfg["heading_control_stiffness"].as<float>(heading_control_stiffness);
-    min_approach_speed = nav_cfg["min_approach_speed"].as<float>(min_approach_speed);
     position_tolerance = nav_cfg["position_tolerance"].as<float>(position_tolerance);
     heading_tolerance = nav_cfg["heading_tolerance"].as<float>(heading_tolerance);
-    lin_vel_x_range = read_range(nav_cfg["ranges"]["lin_vel_x"], lin_vel_x_range);
-    lin_vel_y_range = read_range(nav_cfg["ranges"]["lin_vel_y"], lin_vel_y_range);
-    ang_vel_z_range = read_range(nav_cfg["ranges"]["ang_vel_z"], ang_vel_z_range);
+
+    if (trajectory_seed == 0U) {
+        std::random_device random_device;
+        trajectory_rng.seed(random_device());
+    } else {
+        trajectory_rng.seed(trajectory_seed);
+    }
 
     if (localization_source != "auto" &&
         localization_source != "glim" &&
@@ -192,25 +268,59 @@ State_Navigation::State_Navigation(int state_mode, std::string state_string)
         throw std::runtime_error("Invalid Navigation localization configuration.");
     }
     if (pose_log_enabled &&
-        (pose_log_path.empty() || pose_log_flush_interval == 0)) {
+        (pose_log_path.empty() || target_path_log_path.empty() ||
+         pose_log_flush_interval == 0)) {
         throw std::runtime_error("Invalid Navigation pose log configuration.");
     }
-    if (position_tolerance <= 0.0f || stand_off_distance < 0.0f) {
-        throw std::runtime_error("Invalid Navigation goal or stand-off distance.");
+    if (!std::isfinite(trajectory_step_dt) || trajectory_step_dt <= 0.0f ||
+        !std::isfinite(motion_duration) || motion_duration <= 0.0f ||
+        !std::isfinite(stop_hold_duration) || stop_hold_duration < 0.0f ||
+        !std::isfinite(min_segment_duration) || min_segment_duration <= 0.0f) {
+        throw std::runtime_error(
+            "Navigation trajectory durations must be valid and finite."
+        );
     }
-
-    marker_pose_camera = {
-        goal.position.x() + stand_off_distance * std::cos(goal.yaw) - camera_forward_offset * std::cos(goal.yaw),
-        goal.position.y() + stand_off_distance * std::sin(goal.yaw) - camera_forward_offset * std::sin(goal.yaw),
-        marker_camera_height_offset,
-        0.0f,
-        0.0f,
-        -1.0f,
+    const auto is_step_aligned = [this](float duration) {
+        const float steps = duration / trajectory_step_dt;
+        return std::isfinite(duration) &&
+            std::abs(steps - std::round(steps)) < 1.0e-4f;
     };
-    marker_pose_camera[3] = std::sqrt(
-        marker_pose_camera[0] * marker_pose_camera[0] +
-        marker_pose_camera[2] * marker_pose_camera[2]
-    );
+    const float trajectory_duration = motion_duration + stop_hold_duration;
+    const int motion_steps = static_cast<int>(std::lround(
+        motion_duration / trajectory_step_dt
+    ));
+    const int minimum_segment_steps = static_cast<int>(std::ceil(
+        min_segment_duration / trajectory_step_dt
+    ));
+    const bool valid_trajectory =
+        motion_duration > 0.0f &&
+        stop_hold_duration >= 0.0f &&
+        is_step_aligned(motion_duration) &&
+        is_step_aligned(trajectory_duration) &&
+        start_ramp_duration >= 0.0f &&
+        stop_ramp_duration >= 0.0f &&
+        start_ramp_duration + stop_ramp_duration <= motion_duration &&
+        reference_times[0] > 0.0f &&
+        reference_times[0] < reference_times[1] &&
+        reference_times[1] <= trajectory_duration &&
+        num_segments_range[0] >= 1 &&
+        num_segments_range[0] <= num_segments_range[1] &&
+        num_segments_range[1] * minimum_segment_steps <= motion_steps &&
+        min_segment_duration > 0.0f &&
+        min_radius > 0.0f &&
+        straight_probability >= 0.0f && straight_probability <= 1.0f &&
+        curvature_exponent > 0.0f &&
+        se2_speed_range[0] > 0.0f &&
+        se2_speed_range[0] <= se2_speed_range[1] &&
+        characteristic_length > 0.0f && tracking_gain >= 0.0f &&
+        se2_speed_range[1] <= max_linear_speed &&
+        se2_speed_range[1] / characteristic_length <= max_angular_speed &&
+        standing_probability >= 0.0f && standing_probability <= 1.0f &&
+        position_tolerance > 0.0f && heading_tolerance > 0.0f;
+    if (!valid_trajectory) {
+        throw std::runtime_error("Invalid Navigation trajectory configuration.");
+    }
+    set_safe_stand_observations();
 
     auto articulation = std::make_shared<
         unitree::BaseArticulation<LowState_t::SharedPtr>
@@ -377,107 +487,11 @@ void State_Navigation::enter()
 
 bool State_Navigation::prepare_enter()
 {
-    if (!prompt_goal_on_entry) {
-        return true;
-    }
-    if (goal_input_ready.exchange(false)) {
-        goal_input_requested = false;
-        return true;
-    }
-    {
-        std::lock_guard<std::mutex> lock(goal_input_mutex);
-        if (goal_input_active || goal_input_ready) {
-            return false;
-        }
-        goal_input_cancelled = false;
-        goal_input_requested = true;
-    }
-    return false;
+    return true;
 }
 
 void State_Navigation::cancel_prepare_enter()
 {
-    std::lock_guard<std::mutex> lock(goal_input_mutex);
-    goal_input_requested = false;
-    goal_input_ready = false;
-    goal_input_cancelled = true;
-}
-
-void State_Navigation::process_goal_input()
-{
-    if (!prompt_goal_on_entry || !goal_input_requested) {
-        return;
-    }
-
-    bool expected_inactive = false;
-    if (!goal_input_active.compare_exchange_strong(expected_inactive, true)) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(goal_input_mutex);
-        goal_input_requested = false;
-    }
-
-    NavigationGoal selected_goal = goal;
-    while (true) {
-        std::ostringstream prompt;
-        prompt
-            << "Enter Navigation goal x y yaw_rad in the robot frame at entry "
-            << "(current: " << std::fixed << std::setprecision(3)
-            << goal.position.x() << ' ' << goal.position.y() << ' '
-            << goal.yaw << ", empty = keep current):";
-        const std::string input = keyboard
-            ? keyboard->getString(prompt.str())
-            : std::string{};
-
-        if (input.find_first_not_of(" \t\r\n") == std::string::npos) {
-            break;
-        }
-
-        std::string normalized_input = input;
-        std::replace(normalized_input.begin(), normalized_input.end(), ',', ' ');
-        std::istringstream parser(normalized_input);
-        float goal_x = 0.0f;
-        float goal_y = 0.0f;
-        float goal_yaw = 0.0f;
-        std::string trailing_value;
-        if ((parser >> goal_x >> goal_y >> goal_yaw) &&
-            !(parser >> trailing_value) &&
-            std::isfinite(goal_x) &&
-            std::isfinite(goal_y) &&
-            std::isfinite(goal_yaw)) {
-            selected_goal.position = Eigen::Vector2f(goal_x, goal_y);
-            selected_goal.yaw = wrap_to_pi(goal_yaw);
-            break;
-        }
-
-        spdlog::warn(
-            "Invalid Navigation goal. Enter three finite values: x y yaw_rad."
-        );
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(goal_input_mutex);
-        goal_input_requested = false;
-        if (goal_input_cancelled) {
-            goal_input_cancelled = false;
-            goal_input_active = false;
-            spdlog::warn(
-                "Navigation goal input discarded because the pending "
-                "transition was cancelled."
-            );
-            return;
-        }
-        goal = selected_goal;
-        spdlog::info(
-            "Navigation goal selected: x={:.3f}, y={:.3f}, yaw={:.3f} rad.",
-            goal.position.x(),
-            goal.position.y(),
-            goal.yaw
-        );
-        goal_input_ready = true;
-        goal_input_active = false;
-    }
 }
 
 void State_Navigation::run()
@@ -542,6 +556,11 @@ std::vector<float> State_Navigation::command_observation() const
 std::vector<float> State_Navigation::marker_observation() const
 {
     return std::vector<float>(marker_pose_camera.begin(), marker_pose_camera.end());
+}
+
+std::vector<float> State_Navigation::future_path_observation() const
+{
+    return std::vector<float>(future_path_poses.begin(), future_path_poses.end());
 }
 
 State_Navigation* State_Navigation::instance()
@@ -689,11 +708,14 @@ void State_Navigation::reset_navigation_state()
     estimated_position.setZero();
     initial_odometry_position.setZero();
     initial_odometry_heading = 0.0f;
-    goal_initialized = false;
+    trajectory_initialized = false;
     active_localization_source.clear();
     localization_warning_reported = false;
-    position_reached = false;
     goal_reached = false;
+    goal = TrajectoryPose{};
+    trajectory_poses.clear();
+    trajectory_linear_velocities.clear();
+    trajectory_angular_velocities.clear();
     command = {0.0f, 0.0f, 0.0f};
     {
         std::lock_guard<std::mutex> lock(joint_command_mutex);
@@ -711,6 +733,156 @@ void State_Navigation::reset_navigation_state()
         );
     }
     set_safe_stand_observations();
+}
+
+void State_Navigation::generate_trajectory()
+{
+    const int motion_steps = static_cast<int>(std::lround(
+        motion_duration / trajectory_step_dt
+    ));
+    const float trajectory_duration = motion_duration + stop_hold_duration;
+    const int episode_steps = static_cast<int>(std::lround(
+        trajectory_duration / trajectory_step_dt
+    ));
+    const int minimum_segment_steps = static_cast<int>(std::ceil(
+        min_segment_duration / trajectory_step_dt
+    ));
+
+    std::uniform_int_distribution<int> segment_count_distribution(
+        num_segments_range[0], num_segments_range[1]
+    );
+    const int segment_count = segment_count_distribution(trajectory_rng);
+    std::vector<int> segment_steps(segment_count, minimum_segment_steps);
+    int extra_steps = motion_steps - segment_count * minimum_segment_steps;
+    std::uniform_int_distribution<int> segment_distribution(0, segment_count - 1);
+    while (extra_steps-- > 0) {
+        ++segment_steps[segment_distribution(trajectory_rng)];
+    }
+    std::vector<int> segment_ends(segment_count);
+    std::partial_sum(
+        segment_steps.begin(), segment_steps.end(), segment_ends.begin()
+    );
+
+    std::uniform_real_distribution<float> unit_distribution(0.0f, 1.0f);
+    std::vector<float> curvatures(segment_count, 0.0f);
+    for (float& curvature : curvatures) {
+        if (unit_distribution(trajectory_rng) < straight_probability) {
+            continue;
+        }
+        const float magnitude = std::pow(
+            unit_distribution(trajectory_rng), curvature_exponent
+        ) / min_radius;
+        curvature = unit_distribution(trajectory_rng) < 0.5f
+            ? -magnitude
+            : magnitude;
+    }
+
+    std::uniform_real_distribution<float> speed_distribution(
+        se2_speed_range[0], se2_speed_range[1]
+    );
+    const bool standing =
+        unit_distribution(trajectory_rng) < standing_probability;
+    const float se2_speed = standing ? 0.0f : speed_distribution(trajectory_rng);
+
+    trajectory_poses.assign(episode_steps + 1, TrajectoryPose{});
+    trajectory_linear_velocities.assign(episode_steps, 0.0f);
+    trajectory_angular_velocities.assign(episode_steps, 0.0f);
+
+    int segment_index = 0;
+    float accumulated_rotation = 0.0f;
+    for (int step = 0; step < motion_steps; ++step) {
+        while (step >= segment_ends[segment_index]) {
+            ++segment_index;
+        }
+        const float curvature = curvatures[segment_index];
+        const float midpoint_time = (static_cast<float>(step) + 0.5f)
+            * trajectory_step_dt;
+        float speed_scale = 1.0f;
+        if (midpoint_time < start_ramp_duration) {
+            speed_scale = smoothstep(midpoint_time / start_ramp_duration);
+        }
+        const float stop_start = motion_duration - stop_ramp_duration;
+        if (midpoint_time > stop_start) {
+            speed_scale = smoothstep(
+                (motion_duration - midpoint_time) / stop_ramp_duration
+            );
+        }
+        const float linear_velocity = speed_scale * se2_speed / std::sqrt(
+            1.0f + std::pow(characteristic_length * curvature, 2.0f)
+        );
+        const float angular_velocity = curvature * linear_velocity;
+        trajectory_linear_velocities[step] = linear_velocity;
+        trajectory_angular_velocities[step] = angular_velocity;
+        accumulated_rotation += std::abs(angular_velocity) * trajectory_step_dt;
+
+        const float distance = linear_velocity * trajectory_step_dt;
+        const float angle = curvature * distance;
+        const auto sinc = [](float value) {
+            if (std::abs(value) < 1.0e-6f) {
+                return 1.0f - value * value / 6.0f;
+            }
+            return std::sin(value) / value;
+        };
+        const float local_x = distance * sinc(angle);
+        const float half_angle_sinc = sinc(0.5f * angle);
+        const float local_y = 0.5f * distance * angle
+            * half_angle_sinc * half_angle_sinc;
+        const TrajectoryPose& current = trajectory_poses[step];
+        TrajectoryPose& next = trajectory_poses[step + 1];
+        const float cos_heading = std::cos(current.yaw);
+        const float sin_heading = std::sin(current.yaw);
+        next.position.x() = current.position.x()
+            + cos_heading * local_x - sin_heading * local_y;
+        next.position.y() = current.position.y()
+            + sin_heading * local_x + cos_heading * local_y;
+        next.yaw = current.yaw + angle;
+    }
+    if (accumulated_rotation >= 2.0f * static_cast<float>(M_PI)) {
+        throw std::runtime_error(
+            "Generated Navigation trajectory accumulates a full turn."
+        );
+    }
+    for (int step = motion_steps + 1; step <= episode_steps; ++step) {
+        trajectory_poses[step] = trajectory_poses[motion_steps];
+    }
+
+    goal = trajectory_poses[motion_steps];
+    trajectory_started_at = std::chrono::steady_clock::now();
+    write_target_path_log();
+    spdlog::info(
+        "Navigation path generated: {} segments, SE(2) speed={:.3f}, "
+        "goal=(x={:.3f}, y={:.3f}, yaw={:.3f}).",
+        segment_count,
+        se2_speed,
+        goal.position.x(),
+        goal.position.y(),
+        goal.yaw
+    );
+}
+
+float State_Navigation::trajectory_elapsed_seconds() const
+{
+    if (!trajectory_initialized) {
+        return 0.0f;
+    }
+    return std::max(
+        0.0f,
+        std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - trajectory_started_at
+        ).count()
+    );
+}
+
+std::size_t State_Navigation::trajectory_index(float offset_seconds) const
+{
+    if (trajectory_poses.empty()) {
+        return 0;
+    }
+    const float sample_time = trajectory_elapsed_seconds() + offset_seconds;
+    const auto index = static_cast<std::size_t>(std::max(
+        0L, std::lround(sample_time / trajectory_step_dt)
+    ));
+    return std::min(index, trajectory_poses.size() - 1);
 }
 
 void State_Navigation::update_navigation_state()
@@ -757,22 +929,19 @@ void State_Navigation::update_navigation_state()
         localization_warning_reported = false;
     }
 
-    if (!goal_initialized) {
+    if (!trajectory_initialized) {
         active_localization_source = pose_source;
         initial_odometry_position = localization_pose.position.head<2>();
         initial_odometry_heading = localization_pose.heading;
-        goal_initialized = true;
+        trajectory_initialized = true;
+        generate_trajectory();
         spdlog::info(
-            "Navigation goal initialized from {} pose "
-            "(x={:.3f}, y={:.3f}, yaw={:.3f}) "
-            "goal=(x={:.3f}, y={:.3f}, yaw={:.3f})",
+            "Navigation path frame initialized from {} pose "
+            "(x={:.3f}, y={:.3f}, yaw={:.3f}).",
             active_localization_source,
             initial_odometry_position.x(),
             initial_odometry_position.y(),
-            initial_odometry_heading,
-            goal.position.x(),
-            goal.position.y(),
-            goal.yaw
+            initial_odometry_heading
         );
     }
 
@@ -791,70 +960,75 @@ void State_Navigation::update_navigation_state()
         localization_pose.heading - initial_odometry_heading
     );
 
-    const Eigen::Vector2f target_position(goal.position.x(), goal.position.y());
-    const Eigen::Vector2f delta_navigation =
-        target_position - estimated_position;
+    const std::size_t reference_index = trajectory_index();
+    const std::size_t velocity_index = std::min(
+        reference_index,
+        trajectory_linear_velocities.size() - 1
+    );
+    const TrajectoryPose& reference = trajectory_poses[reference_index];
+    const Eigen::Vector2f position_error_navigation =
+        reference.position - estimated_position;
+    const float reference_linear_velocity =
+        trajectory_linear_velocities[velocity_index];
+    const float reference_angular_velocity =
+        trajectory_angular_velocities[velocity_index];
+    const Eigen::Vector2f reference_velocity_navigation(
+        reference_linear_velocity * std::cos(reference.yaw),
+        reference_linear_velocity * std::sin(reference.yaw)
+    );
+    const Eigen::Vector2f velocity_navigation =
+        reference_velocity_navigation
+        + tracking_gain * position_error_navigation;
     const float cos_heading = std::cos(heading);
     const float sin_heading = std::sin(heading);
-    const Eigen::Vector2f delta_body(
-        cos_heading * delta_navigation.x() +
-            sin_heading * delta_navigation.y(),
-        -sin_heading * delta_navigation.x() +
-            cos_heading * delta_navigation.y()
+    const Eigen::Vector2f position_error_body(
+        cos_heading * position_error_navigation.x() +
+            sin_heading * position_error_navigation.y(),
+        -sin_heading * position_error_navigation.x() +
+            cos_heading * position_error_navigation.y()
     );
-    const float distance = delta_body.norm();
-    const float heading_error = wrap_to_pi(goal.yaw - heading);
-
-    command[0] = std::clamp(
-        position_control_stiffness * delta_body.x(),
-        lin_vel_x_range[0],
-        lin_vel_x_range[1]
-    );
-    command[1] = std::clamp(
-        position_control_stiffness * delta_body.y(),
-        lin_vel_y_range[0],
-        lin_vel_y_range[1]
-    );
-    command[2] = std::clamp(
-        heading_control_stiffness * heading_error,
-        ang_vel_z_range[0],
-        ang_vel_z_range[1]
-    );
-
-    const bool reached_position_now = distance < position_tolerance;
-    const bool reached_heading_now = std::abs(heading_error) < heading_tolerance;
+    command[0] =
+        cos_heading * velocity_navigation.x()
+        + sin_heading * velocity_navigation.y();
+    command[1] =
+        -sin_heading * velocity_navigation.x()
+        + cos_heading * velocity_navigation.y();
     const float linear_speed = std::hypot(command[0], command[1]);
-    if (!reached_position_now && linear_speed > 1.0e-6f && linear_speed < min_approach_speed) {
-        const float speed_scale = min_approach_speed / linear_speed;
+    if (linear_speed > max_linear_speed) {
+        const float speed_scale = max_linear_speed / linear_speed;
         command[0] *= speed_scale;
         command[1] *= speed_scale;
     }
+    const float reference_heading_error = wrap_to_pi(
+        reference.yaw - heading
+    );
+    command[2] = std::clamp(
+        reference_angular_velocity + tracking_gain * reference_heading_error,
+        -max_angular_speed,
+        max_angular_speed
+    );
 
-    position_reached = position_reached || reached_position_now;
-    goal_reached = goal_reached || (position_reached && reached_heading_now);
-    if (position_reached) {
-        command[0] = 0.0f;
-        command[1] = 0.0f;
-    }
-    if (reached_heading_now) {
-        command[2] = 0.0f;
-    }
-    if (goal_reached) {
-        command = {0.0f, 0.0f, 0.0f};
-    }
+    const float goal_position_error =
+        (goal.position - estimated_position).norm();
+    const float goal_heading_error = wrap_to_pi(goal.yaw - heading);
+    goal_reached =
+        trajectory_elapsed_seconds() >= motion_duration &&
+        goal_position_error < position_tolerance &&
+        std::abs(goal_heading_error) < heading_tolerance;
 
     const float camera_heading_in_body = wrap_to_pi(
         camera_heading() - root_heading()
     );
     update_marker_observation(wrap_to_pi(heading + camera_heading_in_body));
+    update_future_path_observation(heading);
     write_pose_log(
         true,
         pose_source,
         localization_pose,
         heading,
-        delta_body,
-        heading_error,
-        distance
+        position_error_body,
+        reference_heading_error,
+        position_error_navigation.norm()
     );
 }
 
@@ -884,7 +1058,7 @@ void State_Navigation::update_marker_observation(float camera_heading_relative)
         -sin_heading * marker_delta_navigation.x() +
         cos_heading * marker_delta_navigation.y();
     const float marker_heading_error = wrap_to_pi(
-        static_cast<float>(M_PI) - camera_heading_relative
+        goal.yaw + static_cast<float>(M_PI) - camera_heading_relative
     );
 
     marker_pose_camera = {
@@ -901,6 +1075,31 @@ void State_Navigation::update_marker_observation(float camera_heading_relative)
     };
 }
 
+void State_Navigation::update_future_path_observation(float robot_heading)
+{
+    const float cos_heading = std::cos(robot_heading);
+    const float sin_heading = std::sin(robot_heading);
+    for (std::size_t reference_index = 0;
+         reference_index < reference_times.size();
+         ++reference_index) {
+        const TrajectoryPose& future = trajectory_poses[
+            trajectory_index(reference_times[reference_index])
+        ];
+        const Eigen::Vector2f delta_navigation =
+            future.position - estimated_position;
+        const std::size_t offset = 4 * reference_index;
+        future_path_poses[offset] =
+            cos_heading * delta_navigation.x()
+            + sin_heading * delta_navigation.y();
+        future_path_poses[offset + 1] =
+            -sin_heading * delta_navigation.x()
+            + cos_heading * delta_navigation.y();
+        const float heading_error = wrap_to_pi(future.yaw - robot_heading);
+        future_path_poses[offset + 2] = std::cos(heading_error);
+        future_path_poses[offset + 3] = std::sin(heading_error);
+    }
+}
+
 void State_Navigation::set_safe_stand_observations()
 {
     const float marker_x = stand_off_distance - camera_forward_offset;
@@ -915,6 +1114,57 @@ void State_Navigation::set_safe_stand_observations()
         0.0f,
         -1.0f,
     };
+    future_path_poses = {
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+    };
+}
+
+void State_Navigation::write_target_path_log() const
+{
+    if (!pose_log_enabled || trajectory_poses.empty()) {
+        return;
+    }
+    auto resolved_path = target_path_log_path;
+    if (resolved_path.is_relative()) {
+        resolved_path = param::proj_dir / resolved_path;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(resolved_path.parent_path(), error);
+    if (error) {
+        spdlog::error(
+            "Failed to create Navigation target path directory {}: {}",
+            resolved_path.parent_path().string(),
+            error.message()
+        );
+        return;
+    }
+    std::ofstream target_path_log(resolved_path, std::ios::out | std::ios::trunc);
+    if (!target_path_log.is_open()) {
+        spdlog::error(
+            "Failed to open Navigation target path log {}.",
+            resolved_path.string()
+        );
+        return;
+    }
+    const std::size_t motion_steps = static_cast<std::size_t>(std::lround(
+        motion_duration / trajectory_step_dt
+    ));
+    target_path_log << "time_s,x_m,y_m,yaw_rad,is_goal\n";
+    target_path_log << std::fixed << std::setprecision(6);
+    for (std::size_t index = 0;
+         index <= motion_steps && index < trajectory_poses.size();
+         ++index) {
+        const TrajectoryPose& pose = trajectory_poses[index];
+        target_path_log
+            << index * trajectory_step_dt << ','
+            << pose.position.x() << ','
+            << pose.position.y() << ','
+            << pose.yaw << ','
+            << (index == motion_steps ? 1 : 0) << '\n';
+    }
+    target_path_log.flush();
+    spdlog::info("Navigation target path log: {}", resolved_path.string());
 }
 
 void State_Navigation::open_pose_log()
@@ -946,6 +1196,36 @@ void State_Navigation::open_pose_log()
             resolved_path.string()
         );
         return;
+    }
+
+    // Remove the previous run's path immediately. The generated path is
+    // written once the first fresh localization sample defines its frame.
+    auto resolved_target_path = target_path_log_path;
+    if (resolved_target_path.is_relative()) {
+        resolved_target_path = param::proj_dir / resolved_target_path;
+    }
+    error.clear();
+    std::filesystem::create_directories(
+        resolved_target_path.parent_path(), error
+    );
+    if (error) {
+        spdlog::error(
+            "Failed to create Navigation target path directory {}: {}",
+            resolved_target_path.parent_path().string(),
+            error.message()
+        );
+    } else {
+        std::ofstream target_path_log(
+            resolved_target_path, std::ios::out | std::ios::trunc
+        );
+        if (target_path_log.is_open()) {
+            target_path_log << "time_s,x_m,y_m,yaw_rad,is_goal\n";
+        } else {
+            spdlog::error(
+                "Failed to clear Navigation target path log {}.",
+                resolved_target_path.string()
+            );
+        }
     }
 
     pose_log
@@ -994,8 +1274,8 @@ void State_Navigation::write_pose_log(
     const std::string& source,
     const LocalizationPose& localization_pose,
     float robot_heading,
-    const Eigen::Vector2f& goal_position_body,
-    float goal_heading_error,
+    const Eigen::Vector2f& reference_position_body,
+    float reference_heading_error,
     float position_error)
 {
     if (!pose_log.is_open()) {
@@ -1041,12 +1321,12 @@ void State_Navigation::write_pose_log(
         << goal.position.x() << ','
         << goal.position.y() << ','
         << goal.yaw << ','
-        << goal_position_body.x() << ','
-        << goal_position_body.y() << ','
-        << goal_heading_error << ','
-        << goal_position_body.x() << ','
-        << goal_position_body.y() << ','
-        << goal_heading_error << ','
+        << reference_position_body.x() << ','
+        << reference_position_body.y() << ','
+        << reference_heading_error << ','
+        << reference_position_body.x() << ','
+        << reference_position_body.y() << ','
+        << reference_heading_error << ','
         << position_error << ','
         << command[0] << ','
         << command[1] << ','

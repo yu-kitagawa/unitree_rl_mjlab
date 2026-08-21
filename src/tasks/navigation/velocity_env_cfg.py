@@ -1,8 +1,8 @@
-"""Goal-conditioned navigation task based on the velocity task.
+"""Trajectory-conditioned navigation task based on the velocity task.
 
 The original velocity gait, regularization, and sim-to-real terms are retained.
-A goal command adds object-relative observations and converts the target pose
-into a smooth body-frame velocity command.
+A time-indexed piecewise-arc command adds receding-horizon path observations
+and supplies the corresponding body-frame reference velocity.
 """
 
 import math
@@ -30,11 +30,11 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 import src.tasks.navigation.mdp as mdp
-from src.tasks.navigation.mdp import GoalPoseCommandCfg
+from src.tasks.navigation.mdp import TrajectoryCommandCfg
 
 
 def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
-  """Create the base goal-conditioned navigation configuration."""
+  """Create the base trajectory-conditioned navigation configuration."""
 
   physics_dt = 0.005
   decimation = 4
@@ -75,8 +75,8 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.generated_commands,
       params={"command_name": "twist"},
     ),
-    "marker_pose_camera": ObservationTermCfg(
-      func=mdp.marker_pose_camera,
+    "future_path_poses": ObservationTermCfg(
+      func=mdp.future_path_poses,
       params={"command_name": "twist"},
       delay_min_lag=0,
       delay_max_lag=max_localization_delay_steps,
@@ -109,19 +109,15 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
   critic_terms = {
     **actor_terms,
     # Privileged current measurement keeps value learning stable.  Only the
-    # deployable actor receives localization/Aruco latency.
-    "marker_pose_camera": ObservationTermCfg(
-      func=mdp.marker_pose_camera_ground_truth,
+    # deployable actor receives localization latency and position noise.
+    "future_path_poses": ObservationTermCfg(
+      func=mdp.future_path_poses_ground_truth,
       params={"command_name": "twist"},
     ),
     "base_lin_vel": ObservationTermCfg(
       func=mdp.builtin_sensor,
       params={"sensor_name": "robot/imu_lin_vel"},
       noise=Unoise(n_min=-0.5, n_max=0.5),
-    ),
-    "target_pose_b": ObservationTermCfg(
-      func=mdp.target_pose_b,
-      params={"command_name": "twist"},
     ),
     "height_scan": ObservationTermCfg(
       func=envs_mdp.height_scan,
@@ -189,31 +185,30 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   commands: dict[str, CommandTermCfg] = {
-    "twist": GoalPoseCommandCfg(
+    "twist": TrajectoryCommandCfg(
       entity_name="robot",
-      camera_site_name="head_camera",
-      resampling_time_range=(4.0, 8.0),
-      stand_off_distance=0.7,
-      marker_height_offset=0.42,
+      resampling_time_range=(4.0, 4.0),
+      reference_times=(1.0, 2.0),
+      motion_duration=3.0,
+      stop_hold_duration=1.0,
+      start_ramp_duration=0.8,
+      stop_ramp_duration=0.8,
+      num_segments_range=(1, 3),
+      min_segment_duration=0.7,
+      min_radius=0.15,
+      straight_probability=0.05,
+      curvature_exponent=1.0,
+      se2_speed_range=(0.20, 0.70),
+      characteristic_length=0.45,
+      tracking_gain=3.0,
+      max_linear_speed=1.0,
+      max_angular_speed=1.6,
       rel_standing_envs=0.1,
-      position_control_stiffness=1.0,
-      heading_control_stiffness=1.0,
-      min_approach_speed=0.35,
       localization_noise_enabled=True,
       localization_position_noise_std=0.01,
       localization_outlier_probability=0.01,
       localization_outlier_position_std=1.0,
-      position_tolerance=0.08,
-      position_recovery_tolerance=0.10,
-      heading_tolerance=0.20,
       debug_vis=True,
-      ranges=GoalPoseCommandCfg.Ranges(
-        object_distance=(0.8, 1.5),
-        object_bearing=(-0.5, 0.5),
-        lin_vel_x=(-0.5, 1.0),
-        lin_vel_y=(-0.5, 0.5),
-        ang_vel_z=(-1.0, 1.0),
-      ),
     )
   }
 
@@ -297,23 +292,13 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   rewards = {
-    "constellation": RewardTermCfg(
-      func=mdp.constellation_reward,
-      weight=2.0,
+    "path_tracking": RewardTermCfg(
+      func=mdp.path_progress_constellation_reward,
+      weight=1.0,
       params={
         "command_name": "twist",
         "decay": 0.2,
         "constellation_radius": 1.0,
-      },
-    ),
-    "goal_stillness": RewardTermCfg(
-      func=mdp.goal_stillness_reward,
-      weight=1.0,
-      params={
-        "command_name": "twist",
-        "lin_vel_std": 0.1,
-        "ang_vel_std": 0.2,
-        "joint_vel_std": 0.5,
       },
     ),
     "track_linear_velocity": RewardTermCfg(
@@ -430,24 +415,6 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
     "terrain_levels": CurriculumTermCfg(
       func=mdp.terrain_levels_nav,
       params={"command_name": "twist"},
-    ),
-    "goal_ranges": CurriculumTermCfg(
-      func=mdp.goal_ranges,
-      params={
-        "command_name": "twist",
-        "goal_stages": [
-          {
-            "step": 2500 * 24,
-            "object_distance": (0.8, 2.2),
-            "object_bearing": (-0.8, 0.8),
-          },
-          {
-            "step": 5000 * 24,
-            "object_distance": (0.8, 3.0),
-            "object_bearing": (-1.2, 1.2),
-          },
-        ],
-      },
     ),
   }
 

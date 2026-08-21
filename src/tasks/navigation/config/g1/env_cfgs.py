@@ -1,4 +1,4 @@
-"""Unitree G1 29-DoF object-front navigation configurations."""
+"""Unitree G1 29-DoF trajectory navigation configurations."""
 
 from src import SRC_PATH
 from src.assets.robots import (
@@ -15,8 +15,8 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from src.tasks.navigation import mdp
 from src.tasks.navigation.mdp import (
-  GoalPoseCommandCfg,
   MotionDerivedJointPoseCommandCfg,
+  TrajectoryCommandCfg,
 )
 from src.tasks.navigation.velocity_env_cfg import make_navigation_env_cfg
 
@@ -65,6 +65,17 @@ _G1_NON_ARM_JOINT_NAMES = tuple(
 
 _ARM_MOTION_DIR = SRC_PATH / "assets" / "motions" / "g1" / "arm_vel"
 
+# The generic G1 wrist-pitch scale is sized for small locomotion corrections.
+# The arm-up reference changes both wrist-pitch joints by about 0.68 rad, which
+# would require policy actions near -9 with that scale. Besides being far
+# outside the usual action range, the first transition alone is then dominated
+# by the action-rate penalty. Give wrist pitch the same command range as the
+# other arm joints for this conditioned task only.
+_G1_NAVIGATION_ACTION_SCALE = dict(G1_ACTION_SCALE)
+_G1_NAVIGATION_ACTION_SCALE[r".*_wrist_pitch_joint"] = G1_ACTION_SCALE[
+  r".*_wrist_roll_joint"
+]
+
 
 def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
   """Condition navigation on equally sampled arm-up and arm-down poses."""
@@ -97,9 +108,12 @@ def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
   )
   cfg.rewards["arm_pose"] = RewardTermCfg(
     func=mdp.track_joint_pose_exp,
-    weight=1.0,
+    weight=2.0,
     params={
-      "std": 0.15,
+      # At std=0.15 the arm-up reward starts near zero and its gradient is
+      # easily overwhelmed by locomotion/path rewards. This width keeps a
+      # useful gradient across the full down-to-up transition.
+      "std": 0.35,
       "command_name": "arm_pose",
       "asset_cfg": arm_asset_cfg,
     },
@@ -177,12 +191,12 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
-  joint_pos_action.scale = G1_ACTION_SCALE
+  joint_pos_action.scale = _G1_NAVIGATION_ACTION_SCALE
 
   cfg.viewer.body_name = "torso_link"
 
   twist_cmd = cfg.commands["twist"]
-  assert isinstance(twist_cmd, GoalPoseCommandCfg)
+  assert isinstance(twist_cmd, TrajectoryCommandCfg)
 
   cfg.observations["critic"].terms["foot_height"].params[
     "asset_cfg"
@@ -257,9 +271,9 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.episode_length_s = int(1e9)
 
     cfg.observations["actor"].enable_corruption = False
-    marker_obs = cfg.observations["actor"].terms["marker_pose_camera"]
-    marker_obs.delay_min_lag = 0
-    marker_obs.delay_max_lag = 0
+    future_path_obs = cfg.observations["actor"].terms["future_path_poses"]
+    future_path_obs.delay_min_lag = 0
+    future_path_obs.delay_max_lag = 0
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
     cfg.events["randomize_terrain"] = EventTermCfg(
@@ -301,11 +315,5 @@ def unitree_g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Disable terrain curriculum (not present in play mode since rough clears all).
   cfg.curriculum.pop("terrain_levels", None)
-
-  if play:
-    twist_cmd = cfg.commands["twist"]
-    assert isinstance(twist_cmd, GoalPoseCommandCfg)
-    twist_cmd.ranges.object_distance = (0.8, 3.0)
-    twist_cmd.ranges.object_bearing = (-1.2, 1.2)
 
   return cfg

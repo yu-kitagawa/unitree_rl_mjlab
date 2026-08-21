@@ -81,8 +81,8 @@ FSM:
       Passive: LT + B.on_pressed
       Velocity: RT + A.on_pressed
 
-    # Select the newest complete policy directory. v0 remains the fallback;
-    # v1_arm becomes active after its exported/policy.onnx is installed.
+    # v2_path contains the trajectory policy trained with the corrected
+    # wrist-pitch action scale.
     policy_dir: config/policy/navigation
 
 

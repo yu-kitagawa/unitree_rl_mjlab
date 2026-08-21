@@ -46,8 +46,8 @@ Run the following command to train a velocity tracking policy:
 python scripts/train.py Unitree-G1-Flat --env.scene.num-envs=4096
 ```
 
-For G1 29-DoF object-front navigation with a head-camera/ArUco relative-pose
-observation:
+For G1 29-DoF trajectory navigation with one- and two-second receding-horizon
+path-pose observations:
 
 ```bash
 python scripts/train.py Unitree-G1-Navigation-Flat --env.scene.num-envs=4096
@@ -266,19 +266,22 @@ For the ROS-free build above, run
 `deploy/robots/g1/build_sim/g1_ctrl --network=lo`. It uses simulator truth
 localization and does not require sourcing a ROS 2 setup file.
 
-When `R2 + B` requests Navigation, the controller prompts in its terminal:
+Install a newly trained 120-input trajectory policy before testing deploy:
 
-```text
-Enter Navigation goal x y yaw_rad in the robot frame at entry (...):
+```bash
+mkdir -p deploy/robots/g1/config/policy/navigation/v2_path/exported
+cp logs/rsl_rl/g1_navigation/<run>/policy.onnx deploy/robots/g1/config/policy/navigation/v2_path/exported/policy.onnx
 ```
 
-For example, `1.0 0.2 0.0` sets a goal 1 m forward and 0.2 m left, with zero
-relative yaw. Comma-separated input is also accepted. The coordinates are
-relative to the robot pose captured when Navigation starts. Pressing Enter on
-an empty line keeps the displayed goal. While the prompt is waiting, the
-current FSM state and LowCmd publishing continue; Navigation starts only after
-valid input. Set `prompt_goal_on_entry: false` in the Navigation `deploy.yaml`
-for non-interactive operation using `goal_x`, `goal_y`, and `goal_yaw`.
+`v2_path` uses the corrected Navigation wrist-pitch action scale. Do not
+replace its ONNX file with a policy trained using the old scale.
+
+When `R2 + B` enters Navigation, the controller immediately samples one path
+with the same arc generator used for training. No terminal goal input is
+required. The path is anchored to the localization pose captured on entry and
+its terminal position and yaw become the displayed goal. The reference remains
+at that terminal pose after the three-second motion section, so the controller
+continues correcting residual position or heading error until Navigation exits.
 
 ### Live Navigation pose plot (sim2sim and real robot)
 
@@ -303,9 +306,15 @@ mapped LowCmd motor entry. Encoder/action columns remain available for all 29
 joints. Unavailable data is written as `nan` without stopping the other
 telemetry.
 
+The complete sampled reference is written separately to
+`deploy/robots/g1/log/navigation_target_path.csv` as soon as localization is
+available. This includes the whole future path rather than only reference
+points that have already elapsed.
+
 The plotter opens a pose window and a joint window. The pose window shows
-`command_rel_pos` approaching zero and the localization pose projected onto an
-XY plane with heading markers. In the joint window, `command_joints` shows the
+`command_rel_pos` approaching zero and overlays the measured robot trajectory
+with the dashed green target path and final goal. In the joint window,
+`command_joints` shows the
 14 commanded arm joints, while `encoder_joints` and `action_joints` show all 29
 G1 joints. To filter the encoder/action plots, pass joint indices; the command
 plot then shows only arm joints contained in that selection. For example:
@@ -319,9 +328,9 @@ stale localization is shown explicitly. This file-based interface is identical
 for the ROS-free sim2sim build and ROS-enabled real-robot build, and keeps GUI
 work outside the control process.
 
-The path, enable flag, and flush interval can be changed with
-`pose_log_path`, `pose_log_enabled`, and `pose_log_flush_interval` in the
-Navigation `deploy.yaml`. If required, install plotting dependencies with
+The log paths, enable flag, and flush interval can be changed with
+`pose_log_path`, `target_path_log_path`, `pose_log_enabled`, and
+`pose_log_flush_interval` in the Navigation `deploy.yaml`. If required, install plotting dependencies with
 `python3 -m pip install matplotlib numpy`.
 
 ## 4.5.2 Real-Robot Deployment
