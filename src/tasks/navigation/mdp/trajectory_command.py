@@ -1,4 +1,4 @@
-"""Time-indexed piecewise-arc commands for path-following navigation."""
+"""Position-indexed piecewise-arc commands for path-following navigation."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _smoothstep(ratio: torch.Tensor) -> torch.Tensor:
 
 
 class TrajectoryCommand(CommandTerm):
-  """Generate a receding-horizon path and its body-frame reference twist."""
+  """Generate a path and reference it from the robot's closest sampled pose."""
 
   cfg: TrajectoryCommandCfg
 
@@ -43,6 +43,7 @@ class TrajectoryCommand(CommandTerm):
 
     self.motion_steps = round(cfg.motion_duration / env.step_dt)
     self.episode_steps = round(cfg.episode_duration / env.step_dt)
+    self.start_ramp_steps = round(cfg.start_ramp_duration / env.step_dt)
     self.min_segment_steps = int(np.ceil(cfg.min_segment_duration / env.step_dt))
     self.reference_step_offsets = torch.tensor(
       [round(offset / env.step_dt) for offset in cfg.reference_times],
@@ -79,6 +80,7 @@ class TrajectoryCommand(CommandTerm):
     self.trajectory_step = torch.zeros(
       self.num_envs, dtype=torch.long, device=self.device
     )
+    self.trajectory_step_ground_truth = torch.zeros_like(self.trajectory_step)
     self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
     self.is_standing_env = torch.zeros(
       self.num_envs, dtype=torch.bool, device=self.device
@@ -113,7 +115,7 @@ class TrajectoryCommand(CommandTerm):
 
   @property
   def command(self) -> torch.Tensor:
-    """Body-frame reference ``(vx, vy, wz)`` at the current path time."""
+    """Body-frame reference ``(vx, vy, wz)`` at the closest path pose."""
     return self.vel_command_b
 
   @property
@@ -140,8 +142,13 @@ class TrajectoryCommand(CommandTerm):
 
   def _future_pose_b(self, *, use_localization_estimate: bool) -> torch.Tensor:
     env_ids = torch.arange(self.num_envs, device=self.device).unsqueeze(-1)
+    reference_step = (
+      self.trajectory_step
+      if use_localization_estimate
+      else self.trajectory_step_ground_truth
+    )
     pose_indices = torch.clamp(
-      self.trajectory_step.unsqueeze(-1) + self.reference_step_offsets,
+      reference_step.unsqueeze(-1) + self.reference_step_offsets,
       max=self.episode_steps,
     )
     future_poses_w = self.trajectory_poses_w[env_ids, pose_indices]
@@ -168,6 +175,14 @@ class TrajectoryCommand(CommandTerm):
       dim=-1,
     )
     return future_pose.flatten(start_dim=1)
+
+  def _closest_trajectory_steps(self, positions_w: torch.Tensor) -> torch.Tensor:
+    """Return the nearest sampled forward-path index for each position."""
+    forward_path = self.trajectory_poses_w[:, : self.motion_steps + 1, :2]
+    distance_sq = torch.sum(
+      (forward_path - positions_w.unsqueeze(1)).square(), dim=-1
+    )
+    return torch.argmin(distance_sq, dim=-1)
 
   def _sample_segment_steps(self, num_samples: int) -> torch.Tensor:
     min_segments, max_segments = self.cfg.num_segments_range
@@ -379,6 +394,7 @@ class TrajectoryCommand(CommandTerm):
       dim=1,
     )
     self.trajectory_step[env_ids] = 0
+    self.trajectory_step_ground_truth[env_ids] = 0
     self.previous_closest_progress[env_ids] = 0.0
     self.closest_progress[env_ids] = 0.0
     self.step_progress[env_ids] = 0.0
@@ -392,21 +408,30 @@ class TrajectoryCommand(CommandTerm):
   def _update_reference_command(self, env_ids: torch.Tensor | None = None) -> None:
     if env_ids is None:
       env_ids = torch.arange(self.num_envs, device=self.device)
-    elapsed_time = self.cfg.episode_duration - self.time_left[env_ids]
-    step = torch.round(elapsed_time / self._env.step_dt).to(torch.long)
-    step = torch.clamp(step, 0, self.episode_steps)
-    self.trajectory_step[env_ids] = step
+    root_pos_w, root_heading_w = self._root_pose_from_qpos()
+    estimated_pos_w = (
+      root_pos_w[:, :2] + self.localization_position_noise_w
+    )
+    estimated_step = self._closest_trajectory_steps(estimated_pos_w)
+    ground_truth_step = self._closest_trajectory_steps(root_pos_w[:, :2])
+    self.trajectory_step[env_ids] = estimated_step[env_ids]
+    self.trajectory_step_ground_truth[env_ids] = ground_truth_step[env_ids]
 
-    velocity_step = torch.clamp(step, max=self.episode_steps - 1)
+    step = estimated_step[env_ids]
+    # A purely position-indexed speed profile has an almost-zero velocity at
+    # index zero and can leave a learned policy standing there indefinitely.
+    # Advance only the startup speed ramp by wall time; path pose references
+    # and all lookaheads remain based on the closest position index.
+    elapsed_time = self.cfg.episode_duration - self.time_left[env_ids]
+    startup_step = torch.round(elapsed_time / self._env.step_dt).to(torch.long)
+    startup_step = torch.clamp(startup_step, 0, self.start_ramp_steps)
+    velocity_step = torch.maximum(step, startup_step)
+    velocity_step = torch.clamp(velocity_step, max=self.episode_steps - 1)
     linear_velocity = self.trajectory_linear_velocities[env_ids, velocity_step]
     angular_velocity = self.trajectory_angular_velocities[env_ids, velocity_step]
     reference_pose = self.trajectory_poses_w[env_ids, step]
     reference_heading = reference_pose[:, 2]
-    root_pos_w, root_heading_w = self._root_pose_from_qpos()
-    estimated_pos_w = (
-      root_pos_w[env_ids, :2] + self.localization_position_noise_w[env_ids]
-    )
-    position_error_w = reference_pose[:, :2] - estimated_pos_w
+    position_error_w = reference_pose[:, :2] - estimated_pos_w[env_ids]
     reference_velocity_w = linear_velocity.unsqueeze(-1) * torch.stack(
       (torch.cos(reference_heading), torch.sin(reference_heading)), dim=-1
     )

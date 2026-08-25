@@ -268,6 +268,9 @@ localization and does not require sourcing a ROS 2 setup file.
 
 Install a newly trained 120-input trajectory policy before testing deploy:
 
+Policies trained before the closest-path-point reference change have the same
+input width but different observation semantics and must be retrained.
+
 ```bash
 mkdir -p deploy/robots/g1/config/policy/navigation/v2_path/exported
 cp logs/rsl_rl/g1_navigation/<run>/policy.onnx deploy/robots/g1/config/policy/navigation/v2_path/exported/policy.onnx
@@ -279,9 +282,10 @@ replace its ONNX file with a policy trained using the old scale.
 When `R2 + B` enters Navigation, the controller immediately samples one path
 with the same arc generator used for training. No terminal goal input is
 required. The path is anchored to the localization pose captured on entry and
-its terminal position and yaw become the displayed goal. The reference remains
-at that terminal pose after the three-second motion section, so the controller
-continues correcting residual position or heading error until Navigation exits.
+its terminal position and yaw become the displayed goal. At each policy step,
+the closest sampled path point becomes the reference. The one- and two-second
+lookaheads are index offsets computed from `reference_times / step_dt`; offsets
+beyond the path remain at the terminal goal.
 
 ### Live Navigation pose plot (sim2sim and real robot)
 
@@ -293,8 +297,9 @@ python3 scripts/plot_deploy_navigation.py
 
 Each Navigation entry truncates and then streams
 `deploy/robots/g1/log/navigation_pose.csv` at the policy rate. The CSV contains
-the relative-position and velocity commands, raw policy actions, commanded arm
-pose targets, encoder joints, joint targets actually written to LowCmd,
+the closest sampled path point's relative pose and cumulative path progress,
+velocity commands, raw policy actions, commanded arm pose targets, encoder
+joints, joint targets actually written to LowCmd,
 projected gravity, and the localization position/quaternion. The
 `slam_pose_*` columns contain GLIM odometry on the real robot and MuJoCo truth
 in sim2sim; use the `source` column (`glim` or `simulator`) to distinguish them.
@@ -309,11 +314,12 @@ telemetry.
 The complete sampled reference is written separately to
 `deploy/robots/g1/log/navigation_target_path.csv` as soon as localization is
 available. This includes the whole future path rather than only reference
-points that have already elapsed.
+points near the robot's current progress.
 
-The plotter opens a pose window and a joint window. The pose window shows
-`command_rel_pos` approaching zero and overlays the measured robot trajectory
-with the dashed green target path and final goal. In the joint window,
+The plotter opens a pose window and a joint window. The pose window shows the
+relative error to the closest sampled path point, plots `closest_progress_m`
+over time, and overlays the measured robot trajectory with the dashed green
+target path and final goal. In the joint window,
 `command_joints` shows the
 14 commanded arm joints, while `encoder_joints` and `action_joints` show all 29
 G1 joints. To filter the encoder/action plots, pass joint indices; the command

@@ -714,8 +714,10 @@ void State_Navigation::reset_navigation_state()
     goal_reached = false;
     goal = TrajectoryPose{};
     trajectory_poses.clear();
+    trajectory_progresses.clear();
     trajectory_linear_velocities.clear();
     trajectory_angular_velocities.clear();
+    closest_progress = 0.0f;
     command = {0.0f, 0.0f, 0.0f};
     {
         std::lock_guard<std::mutex> lock(joint_command_mutex);
@@ -785,6 +787,7 @@ void State_Navigation::generate_trajectory()
     const float se2_speed = standing ? 0.0f : speed_distribution(trajectory_rng);
 
     trajectory_poses.assign(episode_steps + 1, TrajectoryPose{});
+    trajectory_progresses.assign(episode_steps + 1, 0.0f);
     trajectory_linear_velocities.assign(episode_steps, 0.0f);
     trajectory_angular_velocities.assign(episode_steps, 0.0f);
 
@@ -836,6 +839,8 @@ void State_Navigation::generate_trajectory()
         next.position.y() = current.position.y()
             + sin_heading * local_x + cos_heading * local_y;
         next.yaw = current.yaw + angle;
+        trajectory_progresses[step + 1] =
+            trajectory_progresses[step] + distance;
     }
     if (accumulated_rotation >= 2.0f * static_cast<float>(M_PI)) {
         throw std::runtime_error(
@@ -844,6 +849,7 @@ void State_Navigation::generate_trajectory()
     }
     for (int step = motion_steps + 1; step <= episode_steps; ++step) {
         trajectory_poses[step] = trajectory_poses[motion_steps];
+        trajectory_progresses[step] = trajectory_progresses[motion_steps];
     }
 
     goal = trajectory_poses[motion_steps];
@@ -860,28 +866,42 @@ void State_Navigation::generate_trajectory()
     );
 }
 
-float State_Navigation::trajectory_elapsed_seconds() const
-{
-    if (!trajectory_initialized) {
-        return 0.0f;
-    }
-    return std::max(
-        0.0f,
-        std::chrono::duration<float>(
-            std::chrono::steady_clock::now() - trajectory_started_at
-        ).count()
-    );
-}
-
-std::size_t State_Navigation::trajectory_index(float offset_seconds) const
+std::size_t State_Navigation::closest_trajectory_index(
+    const Eigen::Vector2f& position) const
 {
     if (trajectory_poses.empty()) {
         return 0;
     }
-    const float sample_time = trajectory_elapsed_seconds() + offset_seconds;
-    const auto index = static_cast<std::size_t>(std::max(
-        0L, std::lround(sample_time / trajectory_step_dt)
+    const std::size_t motion_steps = static_cast<std::size_t>(std::lround(
+        motion_duration / trajectory_step_dt
     ));
+    const std::size_t last_path_index = std::min(
+        motion_steps, trajectory_poses.size() - 1
+    );
+    std::size_t closest_index = 0;
+    float closest_distance_sq = std::numeric_limits<float>::infinity();
+    for (std::size_t index = 0; index <= last_path_index; ++index) {
+        const float distance_sq =
+            (trajectory_poses[index].position - position).squaredNorm();
+        if (distance_sq < closest_distance_sq) {
+            closest_distance_sq = distance_sq;
+            closest_index = index;
+        }
+    }
+    return closest_index;
+}
+
+std::size_t State_Navigation::offset_trajectory_index(
+    std::size_t reference_index,
+    float offset_seconds) const
+{
+    if (trajectory_poses.empty()) {
+        return 0;
+    }
+    const auto offset_steps = static_cast<std::size_t>(std::max(
+        0L, std::lround(offset_seconds / trajectory_step_dt)
+    ));
+    const std::size_t index = reference_index + offset_steps;
     return std::min(index, trajectory_poses.size() - 1);
 }
 
@@ -908,6 +928,7 @@ void State_Navigation::update_navigation_state()
             localization_pose,
             nan,
             Eigen::Vector2f(nan, nan),
+            nan,
             nan,
             nan
         );
@@ -960,9 +981,24 @@ void State_Navigation::update_navigation_state()
         localization_pose.heading - initial_odometry_heading
     );
 
-    const std::size_t reference_index = trajectory_index();
+    const std::size_t reference_index = closest_trajectory_index(
+        estimated_position
+    );
+    closest_progress = trajectory_progresses[reference_index];
+    const float startup_elapsed = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - trajectory_started_at
+    ).count();
+    const std::size_t startup_ramp_steps = static_cast<std::size_t>(std::lround(
+        start_ramp_duration / trajectory_step_dt
+    ));
+    const std::size_t startup_step = std::min(
+        static_cast<std::size_t>(std::max(
+            0L, std::lround(startup_elapsed / trajectory_step_dt)
+        )),
+        startup_ramp_steps
+    );
     const std::size_t velocity_index = std::min(
-        reference_index,
+        std::max(reference_index, startup_step),
         trajectory_linear_velocities.size() - 1
     );
     const TrajectoryPose& reference = trajectory_poses[reference_index];
@@ -1012,7 +1048,6 @@ void State_Navigation::update_navigation_state()
         (goal.position - estimated_position).norm();
     const float goal_heading_error = wrap_to_pi(goal.yaw - heading);
     goal_reached =
-        trajectory_elapsed_seconds() >= motion_duration &&
         goal_position_error < position_tolerance &&
         std::abs(goal_heading_error) < heading_tolerance;
 
@@ -1020,7 +1055,7 @@ void State_Navigation::update_navigation_state()
         camera_heading() - root_heading()
     );
     update_marker_observation(wrap_to_pi(heading + camera_heading_in_body));
-    update_future_path_observation(heading);
+    update_future_path_observation(heading, reference_index);
     write_pose_log(
         true,
         pose_source,
@@ -1028,7 +1063,8 @@ void State_Navigation::update_navigation_state()
         heading,
         position_error_body,
         reference_heading_error,
-        position_error_navigation.norm()
+        position_error_navigation.norm(),
+        closest_progress
     );
 }
 
@@ -1075,15 +1111,20 @@ void State_Navigation::update_marker_observation(float camera_heading_relative)
     };
 }
 
-void State_Navigation::update_future_path_observation(float robot_heading)
+void State_Navigation::update_future_path_observation(
+    float robot_heading,
+    std::size_t closest_reference_index)
 {
     const float cos_heading = std::cos(robot_heading);
     const float sin_heading = std::sin(robot_heading);
     for (std::size_t reference_index = 0;
          reference_index < reference_times.size();
-         ++reference_index) {
+        ++reference_index) {
         const TrajectoryPose& future = trajectory_poses[
-            trajectory_index(reference_times[reference_index])
+            offset_trajectory_index(
+                closest_reference_index,
+                reference_times[reference_index]
+            )
         ];
         const Eigen::Vector2f delta_navigation =
             future.position - estimated_position;
@@ -1235,6 +1276,7 @@ void State_Navigation::open_pose_log()
         << "slam_pose_theta_rad,goal_x_m,goal_y_m,goal_yaw_rad,"
         << "command_rel_pos_x_m,command_rel_pos_y_m,command_rel_yaw_rad,"
         << "goal_body_x_m,goal_body_y_m,goal_yaw_error_rad,position_error_m,"
+        << "closest_progress_m,"
         << "command_vx_mps,command_vy_mps,command_wz_radps,"
         << "cmd_vx_mps,cmd_vy_mps,cmd_wz_radps,"
         << "projected_gravity_x,projected_gravity_y,projected_gravity_z,"
@@ -1276,7 +1318,8 @@ void State_Navigation::write_pose_log(
     float robot_heading,
     const Eigen::Vector2f& reference_position_body,
     float reference_heading_error,
-    float position_error)
+    float position_error,
+    float closest_progress_value)
 {
     if (!pose_log.is_open()) {
         return;
@@ -1328,6 +1371,7 @@ void State_Navigation::write_pose_log(
         << reference_position_body.y() << ','
         << reference_heading_error << ','
         << position_error << ','
+        << closest_progress_value << ','
         << command[0] << ','
         << command[1] << ','
         << command[2] << ','

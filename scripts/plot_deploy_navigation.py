@@ -57,6 +57,7 @@ SCALAR_FIELDS = (
     "command_rel_pos_y_m",
     "command_rel_yaw_rad",
     "position_error_m",
+    "closest_progress_m",
     "goal_reached",
 )
 JOINT_PREFIXES = (
@@ -334,8 +335,8 @@ def main() -> None:
     tail = NavigationLogTail(args.log_file.expanduser().resolve(), args.max_points)
     target_path = TargetPathLog(args.target_path_file.expanduser().resolve())
 
-    pose_figure, (relative_axis, trajectory_axis) = plt.subplots(
-        1, 2, figsize=(14, 6), constrained_layout=True
+    pose_figure, (relative_axis, progress_axis, trajectory_axis) = plt.subplots(
+        1, 3, figsize=(20, 6), constrained_layout=True
     )
     relative_yaw_axis = relative_axis.twinx()
     (relative_x_line,) = relative_axis.plot([], [], label="rel x", color="tab:blue")
@@ -354,6 +355,15 @@ def main() -> None:
     relative_axis.grid(True)
     relative_lines = [relative_x_line, relative_y_line, distance_line, relative_yaw_line]
     relative_axis.legend(relative_lines, [line.get_label() for line in relative_lines])
+
+    (closest_progress_line,) = progress_axis.plot(
+        [], [], label="closest progress", color="tab:purple", linewidth=2.0
+    )
+    progress_axis.set_title("Closest path progress")
+    progress_axis.set_xlabel("time [s]")
+    progress_axis.set_ylabel("path progress [m]")
+    progress_axis.grid(True)
+    progress_axis.legend(loc="best")
 
     (trajectory_line,) = trajectory_axis.plot(
         [], [], label="robot path", color="tab:blue"
@@ -403,8 +413,8 @@ def main() -> None:
     action_axis = joint_axes[2]
 
     command_axis.set_title("Command joints (arm pose target)")
-    encoder_axis.set_title("Encoder joints (arms)")
-    action_axis.set_title("Action joints (arms)")
+    encoder_axis.set_title("Encoder joints")
+    action_axis.set_title("Action joints")
 
     for ax in joint_axes:
         ax.grid(True)
@@ -482,6 +492,7 @@ def main() -> None:
         relative_y_line.set_data(time_s, data["command_rel_pos_y_m"])
         distance_line.set_data(time_s, data["position_error_m"])
         relative_yaw_line.set_data(time_s, data["command_rel_yaw_rad"])
+        closest_progress_line.set_data(time_s, data["closest_progress_m"])
 
         slam_x = data["slam_pose_x_m"]
         slam_y = data["slam_pose_y_m"]
@@ -620,6 +631,9 @@ def main() -> None:
 
         relative_yaw_axis.relim()
         relative_yaw_axis.autoscale_view()
+
+        progress_axis.relim()
+        progress_axis.autoscale_view()
 
         if valid_pose.size:
             valid_x = slam_x[valid_pose]

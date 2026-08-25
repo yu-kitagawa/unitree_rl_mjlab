@@ -67,11 +67,15 @@ private:
         float& age_seconds);
     void reset_navigation_state();
     void generate_trajectory();
-    std::size_t trajectory_index(float offset_seconds = 0.0f) const;
-    float trajectory_elapsed_seconds() const;
+    std::size_t closest_trajectory_index(const Eigen::Vector2f& position) const;
+    std::size_t offset_trajectory_index(
+        std::size_t reference_index,
+        float offset_seconds) const;
     void update_navigation_state();
     void update_marker_observation(float camera_heading);
-    void update_future_path_observation(float robot_heading);
+    void update_future_path_observation(
+        float robot_heading,
+        std::size_t reference_index);
     void set_safe_stand_observations();
     void open_pose_log();
     void close_pose_log();
@@ -83,7 +87,8 @@ private:
         float robot_heading,
         const Eigen::Vector2f& reference_position_body,
         float reference_heading_error,
-        float position_error);
+        float position_error,
+        float closest_progress);
 
     float root_heading() const;
     float camera_heading() const;
@@ -128,9 +133,11 @@ private:
                                            0.0f, 0.0f, 1.0f, 0.0f};
 
     std::vector<TrajectoryPose> trajectory_poses;
+    std::vector<float> trajectory_progresses;
     std::vector<float> trajectory_linear_velocities;
     std::vector<float> trajectory_angular_velocities;
     std::chrono::steady_clock::time_point trajectory_started_at{};
+    float closest_progress{0.0f};
     std::mt19937 trajectory_rng;
 
     std::ofstream pose_log;
