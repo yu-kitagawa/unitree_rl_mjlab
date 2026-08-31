@@ -3,6 +3,8 @@
 from src import SRC_PATH
 from src.assets.robots import (
   G1_ACTION_SCALE,
+  G1_ARM_JOINT_NAMES,
+  G1_JOINT_NAMES,
   get_g1_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -15,55 +17,18 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from src.tasks.navigation import mdp
 from src.tasks.navigation.mdp import (
-  MotionDerivedJointPoseCommandCfg,
+  JointPoseLibraryCommandCfg,
   TrajectoryCommandCfg,
 )
 from src.tasks.navigation.velocity_env_cfg import make_navigation_env_cfg
 
 
-_G1_MOTION_JOINT_NAMES = (
-  "left_hip_pitch_joint",
-  "left_hip_roll_joint",
-  "left_hip_yaw_joint",
-  "left_knee_joint",
-  "left_ankle_pitch_joint",
-  "left_ankle_roll_joint",
-  "right_hip_pitch_joint",
-  "right_hip_roll_joint",
-  "right_hip_yaw_joint",
-  "right_knee_joint",
-  "right_ankle_pitch_joint",
-  "right_ankle_roll_joint",
-  "waist_yaw_joint",
-  "waist_roll_joint",
-  "waist_pitch_joint",
-  "left_shoulder_pitch_joint",
-  "left_shoulder_roll_joint",
-  "left_shoulder_yaw_joint",
-  "left_elbow_joint",
-  "left_wrist_roll_joint",
-  "left_wrist_pitch_joint",
-  "left_wrist_yaw_joint",
-  "right_shoulder_pitch_joint",
-  "right_shoulder_roll_joint",
-  "right_shoulder_yaw_joint",
-  "right_elbow_joint",
-  "right_wrist_roll_joint",
-  "right_wrist_pitch_joint",
-  "right_wrist_yaw_joint",
-)
-
-_G1_ARM_JOINT_NAMES = tuple(
-  name
-  for name in _G1_MOTION_JOINT_NAMES
-  if any(part in name for part in ("shoulder", "elbow", "wrist"))
-)
-
 _G1_NON_ARM_JOINT_NAMES = tuple(
-  name for name in _G1_MOTION_JOINT_NAMES if name not in _G1_ARM_JOINT_NAMES
+  name for name in G1_JOINT_NAMES if name not in G1_ARM_JOINT_NAMES
 )
 
 _ARM_MOTION_DIR = SRC_PATH / "assets" / "motions" / "g1" / "arm_vel"
+_ARM_POSE_LIBRARY = _ARM_MOTION_DIR / "carry_poses.npz"
 
 # The generic G1 wrist-pitch scale is sized for small locomotion corrections.
 # The arm-up reference changes both wrist-pitch joints by about 0.68 rad, which
@@ -78,18 +43,11 @@ _G1_NAVIGATION_ACTION_SCALE[r".*_wrist_pitch_joint"] = G1_ACTION_SCALE[
 
 
 def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
-  """Condition navigation on equally sampled arm-up and arm-down poses."""
-  cfg.commands["arm_pose"] = MotionDerivedJointPoseCommandCfg(
+  """Condition navigation on down and collision-checked carrying poses."""
+  cfg.commands["arm_pose"] = JointPoseLibraryCommandCfg(
     entity_name="robot",
-    joint_names=_G1_ARM_JOINT_NAMES,
-    motion_joint_names=_G1_MOTION_JOINT_NAMES,
-    motion_files=(
-      str(_ARM_MOTION_DIR / "arm_down.npz"),
-      str(_ARM_MOTION_DIR / "arm_up.npz"),
-    ),
-    # arm_down walks in [0, 80). arm_up holds the raised pose in [170, 260).
-    motion_frame_ranges=((0, 80), (170, 260)),
-    sampling_weights=(1.0, 1.0),
+    joint_names=G1_ARM_JOINT_NAMES,
+    pose_file=str(_ARM_POSE_LIBRARY),
     # Keep the sampled pose fixed for the whole episode.
     resampling_time_range=(1.0e9, 1.0e9),
     debug_vis=False,
@@ -103,7 +61,7 @@ def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
 
   arm_asset_cfg = SceneEntityCfg(
     "robot",
-    joint_names=_G1_ARM_JOINT_NAMES,
+    joint_names=G1_ARM_JOINT_NAMES,
     preserve_order=True,
   )
   cfg.rewards["arm_pose"] = RewardTermCfg(
@@ -112,7 +70,7 @@ def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
     params={
       # At std=0.15 the arm-up reward starts near zero and its gradient is
       # easily overwhelmed by locomotion/path rewards. This width keeps a
-      # useful gradient across the full down-to-up transition.
+      # useful gradient across the full down-to-carrying target range.
       "std": 0.35,
       "command_name": "arm_pose",
       "asset_cfg": arm_asset_cfg,

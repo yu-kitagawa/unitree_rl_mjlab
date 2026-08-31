@@ -79,7 +79,40 @@ r_path = r_progress + r_constellation
 既定値は `r=1.0 m`, `w_c=0.2` です。負方向へ進むと `r_progress` も負になります。
 
 velocityタスク由来の速度追従、姿勢、周期、足上げ、滑り、着地、関節平滑化の報酬は
-引き続き有効です。腕姿勢はepisodeごとに上/下を同確率で選び、そのepisode中は固定します。
+引き続き有効です。腕姿勢はepisodeごとに下げ姿勢と腕上げ姿勢群を50%ずつ
+選び、腕上げ側では生成した各姿勢を一様にサンプリングします。目標はそのepisode中は
+固定です。
+
+## 腕上げ姿勢ライブラリ
+
+荷物を体の前で保持する想定の腕上げ姿勢を、次のコマンドで再生成できます。
+
+```bash
+tmp/bin/python scripts/generate_g1_arm_carry_poses.py \
+  --num-raised-poses 32 --seed 42
+```
+
+左右の腕をほぼ対称にサンプリングし、次をすべて満たす候補だけを
+`src/assets/motions/g1/arm_vel/carry_poses.npz`に保存します。
+
+- G1の各関節制限から既定で0.08 rad以上内側
+- 左右の手首が体の前方で荷物を支えられる幅・高さ
+- 元の腕上げ姿勢からの補間途中を含め、MuJoCo上で自己接触なし
+- 他の採用姿勢との関節空間RMS距離が既定で0.10 rad以上
+
+姿勢一覧はGUIなしでも確認できます。
+
+```bash
+tmp/bin/python scripts/view_g1_arm_pose_library.py --list
+```
+
+MuJoCo viewerでは全姿勢が2秒ごとに切り替わります。特定の姿勢を固定表示する場合は
+`--pose-index`を指定します。
+
+```bash
+tmp/bin/python scripts/view_g1_arm_pose_library.py
+tmp/bin/python scripts/view_g1_arm_pose_library.py --pose-index 5
+```
 
 ## 実行
 
@@ -99,6 +132,8 @@ python scripts/play.py Unitree-G1-Navigation-Flat \
 読み込めません。新規にtrainしてください。
 また、最近点基準への変更前に学習した120次元モデルは形状上は読み込めますが、
 観測と速度指令の意味が異なるため再学習が必要です。
+腕姿勢ライブラリ導入前の120次元モデルも形状は変わりませんが、新しい腕目標群を
+学習していないため再学習してください。
 
 deploy用の修正済120次元設定は `navigation/v2_path` にあります。
 修正後に新規trainしたONNXだけを使用してください。

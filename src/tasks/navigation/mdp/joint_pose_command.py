@@ -159,3 +159,118 @@ class MotionDerivedJointPoseCommandCfg(CommandTermCfg):
 
   def build(self, env: ManagerBasedRlEnv) -> MotionDerivedJointPoseCommand:
     return MotionDerivedJointPoseCommand(self, env)
+
+
+class JointPoseLibraryCommand(CommandTerm):
+  """Sample episode-fixed joint targets from a validated NPZ pose library."""
+
+  cfg: JointPoseLibraryCommandCfg
+
+  def __init__(
+    self,
+    cfg: JointPoseLibraryCommandCfg,
+    env: ManagerBasedRlEnv,
+  ):
+    super().__init__(cfg, env)
+    self.robot: Entity = env.scene[cfg.entity_name]
+    self.joint_ids, resolved_joint_names = self.robot.find_joints(
+      cfg.joint_names, preserve_order=True
+    )
+    if tuple(resolved_joint_names) != cfg.joint_names:
+      raise ValueError(
+        "The controlled joints must resolve in the same order as `joint_names`."
+      )
+
+    self.pose_targets, self.sampling_weights = self._load_pose_library()
+    self.pose_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+    self.pose_command = torch.zeros(
+      self.num_envs,
+      len(cfg.joint_names),
+      dtype=torch.float32,
+      device=self.device,
+    )
+    self.metrics["mean_joint_pose_error"] = torch.zeros(
+      self.num_envs, dtype=torch.float32, device=self.device
+    )
+
+  @property
+  def command(self) -> torch.Tensor:
+    return self.pose_command
+
+  def _load_pose_library(self) -> tuple[torch.Tensor, torch.Tensor]:
+    path = Path(self.cfg.pose_file)
+    if not path.is_file():
+      raise FileNotFoundError(f"Joint pose library not found: {path}")
+
+    with np.load(path, allow_pickle=False) as data:
+      required = {"joint_names", "poses", "sampling_weights"}
+      missing = required - set(data.files)
+      if missing:
+        raise KeyError(
+          f"Joint pose library {path} is missing: {', '.join(sorted(missing))}."
+        )
+      library_joint_names = tuple(str(name) for name in data["joint_names"])
+      poses = np.asarray(data["poses"], dtype=np.float32)
+      sampling_weights = np.asarray(data["sampling_weights"], dtype=np.float32)
+
+    if library_joint_names != self.cfg.joint_names:
+      raise ValueError(
+        f"Joint pose library order {library_joint_names} does not match "
+        f"configured order {self.cfg.joint_names}."
+      )
+    if (
+      poses.ndim != 2
+      or poses.shape[0] == 0
+      or poses.shape[1] != len(self.cfg.joint_names)
+    ):
+      raise ValueError(
+        f"`poses` in {path} must have shape (N, {len(self.cfg.joint_names)}), "
+        f"got {poses.shape}."
+      )
+    if sampling_weights.shape != (poses.shape[0],):
+      raise ValueError(
+        f"`sampling_weights` in {path} must have shape ({poses.shape[0]},), "
+        f"got {sampling_weights.shape}."
+      )
+    if not np.all(np.isfinite(poses)):
+      raise ValueError(f"Joint pose library contains non-finite poses: {path}")
+    if (
+      not np.all(np.isfinite(sampling_weights))
+      or np.any(sampling_weights < 0.0)
+      or not np.any(sampling_weights > 0.0)
+    ):
+      raise ValueError(
+        f"Joint pose library weights must be finite, non-negative, and nonzero: {path}"
+      )
+
+    return (
+      torch.as_tensor(poses, dtype=torch.float32, device=self.device),
+      torch.as_tensor(sampling_weights, dtype=torch.float32, device=self.device),
+    )
+
+  def _update_metrics(self) -> None:
+    joint_pos = self.robot.data.joint_pos[:, self.joint_ids]
+    mean_error = torch.mean(torch.abs(joint_pos - self.pose_command), dim=1)
+    self.metrics["mean_joint_pose_error"] += mean_error / self._env.max_episode_length
+
+  def _resample_command(self, env_ids: torch.Tensor) -> None:
+    pose_ids = torch.multinomial(
+      self.sampling_weights,
+      num_samples=len(env_ids),
+      replacement=True,
+    )
+    self.pose_ids[env_ids] = pose_ids
+    self.pose_command[env_ids] = self.pose_targets[pose_ids]
+
+  def _update_command(self) -> None:
+    pass
+
+
+@dataclass(kw_only=True)
+class JointPoseLibraryCommandCfg(CommandTermCfg):
+  entity_name: str
+  joint_names: tuple[str, ...]
+  pose_file: str
+
+  def build(self, env: ManagerBasedRlEnv) -> JointPoseLibraryCommand:
+    return JointPoseLibraryCommand(self, env)

@@ -14,6 +14,12 @@ from .unitree_g1.g1_constants import (
   G1_ACTION_SCALE as G1_ACTION_SCALE,
 )
 from .unitree_g1.g1_constants import (
+  G1_ARM_JOINT_NAMES as G1_ARM_JOINT_NAMES,
+)
+from .unitree_g1.g1_constants import (
+  G1_JOINT_NAMES as G1_JOINT_NAMES,
+)
+from .unitree_g1.g1_constants import (
   get_g1_robot_cfg as get_g1_robot_cfg,
 )
 
