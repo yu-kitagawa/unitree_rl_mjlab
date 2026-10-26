@@ -5,16 +5,17 @@
 
 ## 軌道生成
 
-軌道は制御周期 `0.02 s` ごとに離散化し、4秒ごとに現在のロボット姿勢を
+軌道は制御周期 `0.02 s` ごとに離散化し、6秒ごとに現在のロボット姿勢を
 原点として生成します。
 
 - 移動区間: 3秒
-- 終端での停止保持: 1秒
+- 終端での停止保持: 3秒
 - 曲率一定区間数: 1〜3
 - 各区間の最短時間: 0.7秒
 - 最小旋回半径: 0.15 m
 - 直線区間の確率: 5%
 - SE(2)速度: 0.20〜0.70
+- 後退軌道の確率: 25%（速度0.10〜0.35 m/s）
 - 始動・停止ramp: 各0.8秒
 
 各区間では曲率 `kappa` と進行距離 `s` から、数値的に安定なsinc形式で
@@ -27,7 +28,9 @@ y     = 0.5 * s * phi * sinc(phi / (2 pi))^2
 theta = phi
 ```
 
-episodeの10%は停止軌道として生成し、静止動作も同時に学習します。
+episodeの25%は停止軌道として生成し、静止動作も同時に学習します。
+後退時も軌道上の移動距離は正の進捗として評価されるため、正しい後退を
+`path_progress` が罰しません。
 
 ## 軌道観測
 
@@ -80,7 +83,9 @@ r_path = r_progress + r_constellation
 velocityタスク由来の速度追従、姿勢、周期、足上げ、滑り、着地、関節平滑化の報酬は
 引き続き有効です。腕姿勢はepisodeごとに下げ姿勢と腕上げ姿勢群を50%ずつ
 選び、腕上げ側では生成した各姿勢を一様にサンプリングします。目標はそのepisode中は
-固定です。
+固定です。腕上げ時は左右の手首へ独立に0〜9.81 Nの下向き荷重を与えます。
+停止中に傾きまたは角速度が大きくなった場合は、脚の姿勢固定報酬を弱め、
+腕姿勢を保ったまま踏み直せるようにしています。
 
 ## 腕上げ姿勢ライブラリ
 
@@ -158,6 +163,7 @@ cp logs/rsl_rl/g1_navigation/<run>/policy.onnx deploy/robots/g1/config/policy/na
 - 軌道形状: `num_segments_range`, `min_segment_duration`, `min_radius`,
   `straight_probability`, `curvature_exponent`
 - 速度・追従補正: `se2_speed_range`, `characteristic_length`, `tracking_gain`
+- 後退: `reverse_probability`, `reverse_speed_range`
 - 自己位置ノイズ: `localization_position_noise_std`,
   `localization_outlier_probability`, `localization_outlier_position_std`
 - constellation: `path_tracking`報酬の`decay`, `constellation_radius`

@@ -44,9 +44,7 @@ def constellation_reward(
   asset: Entity = env.scene[asset_cfg.name]
   command = cast(GoalPoseCommand, env.command_manager.get_term(command_name))
 
-  position_error = (
-    asset.data.root_link_pos_w[:, :2] - command.target_pos_w
-  )
+  position_error = asset.data.root_link_pos_w[:, :2] - command.target_pos_w
   position_distance_sq = torch.sum(torch.square(position_error), dim=-1)
   heading_error = torch.atan2(
     torch.sin(asset.data.heading_w - command.target_heading_w),
@@ -76,29 +74,19 @@ def path_progress_constellation_reward(
   constellation_radius: float = 1.0,
 ) -> torch.Tensor:
   """Reward signed path progress plus SE(2) alignment to the closest point."""
-  command = cast(
-    TrajectoryCommand, env.command_manager.get_term(command_name)
-  )
+  command = cast(TrajectoryCommand, env.command_manager.get_term(command_name))
   command.update_path_tracking()
 
   position_distance_sq = command.distance_to_path.square()
   orientation_distance = (
-    2.0
-    * constellation_radius**2
-    * (1.0 - torch.cos(command.path_heading_error))
+    2.0 * constellation_radius**2 * (1.0 - torch.cos(command.path_heading_error))
   )
   constellation_distance = position_distance_sq + orientation_distance
   constellation = torch.exp(-decay * constellation_distance)
 
-  env.extras["log"]["Metrics/path_step_progress"] = torch.mean(
-    command.step_progress
-  )
-  env.extras["log"]["Metrics/path_progress"] = torch.mean(
-    command.closest_progress
-  )
-  env.extras["log"]["Metrics/path_distance"] = torch.mean(
-    command.distance_to_path
-  )
+  env.extras["log"]["Metrics/path_step_progress"] = torch.mean(command.step_progress)
+  env.extras["log"]["Metrics/path_progress"] = torch.mean(command.closest_progress)
+  env.extras["log"]["Metrics/path_distance"] = torch.mean(command.distance_to_path)
   env.extras["log"]["Metrics/path_heading_error"] = torch.mean(
     torch.abs(command.path_heading_error)
   )
@@ -126,15 +114,17 @@ def goal_stillness_reward(
   asset: Entity = env.scene[asset_cfg.name]
   command = cast(GoalPoseCommand, env.command_manager.get_term(command_name))
 
-  lin_vel_error = torch.sum(
-    torch.square(asset.data.root_link_lin_vel_b[:, :2]), dim=-1
-  ) / lin_vel_std**2
-  ang_vel_error = torch.sum(
-    torch.square(asset.data.root_link_ang_vel_b), dim=-1
-  ) / ang_vel_std**2
-  joint_vel_error = torch.mean(
-    torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=-1
-  ) / joint_vel_std**2
+  lin_vel_error = (
+    torch.sum(torch.square(asset.data.root_link_lin_vel_b[:, :2]), dim=-1)
+    / lin_vel_std**2
+  )
+  ang_vel_error = (
+    torch.sum(torch.square(asset.data.root_link_ang_vel_b), dim=-1) / ang_vel_std**2
+  )
+  joint_vel_error = (
+    torch.mean(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=-1)
+    / joint_vel_std**2
+  )
   # Separate Cauchy kernels keep a useful gradient at approach speed.  The
   # previous product exponential was already around 1e-6 at 0.35 m/s and
   # provided effectively no braking signal in training.
@@ -296,7 +286,9 @@ def feet_air_time(
   in_contact = contact_time > 0.0
   in_mode_time = torch.where(in_contact, contact_time, air_time)
   single_stance = torch.mean(in_contact.float(), dim=1) == 0.5
-  mode_time = torch.min(torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1)[0]
+  mode_time = torch.min(
+    torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1
+  )[0]
   error = torch.abs(mode_time - threshold)
   reward = torch.clamp(threshold - error, min=0.0)
   if command_name is not None:
@@ -336,30 +328,32 @@ def feet_clearance(
 
 
 def feet_gait(
-        env: ManagerBasedRlEnv,
-        period: float,
-        offset: list[float],
-        threshold: float,
-        command_threshold: float,
-        command_name: str,
-        sensor_name: str,
+  env: ManagerBasedRlEnv,
+  period: float,
+  offset: list[float],
+  threshold: float,
+  command_threshold: float,
+  command_name: str,
+  sensor_name: str,
 ) -> torch.Tensor:
-    sensor: ContactSensor = env.scene[sensor_name]
-    is_contact = sensor.data.current_contact_time > 0
-    global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
-    offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)
-    leg_phase = (global_phase + offsets) % 1.0
-    is_stance = (leg_phase < threshold)
-    reward = (is_stance == is_contact).float().mean(dim=1)
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            linear_norm = torch.norm(command[:, :2], dim=1)
-            angular_norm = torch.abs(command[:, 2])
-            total_command = linear_norm + angular_norm
-            scale = (total_command > command_threshold).float()
-            reward *= scale
-    return reward
+  sensor: ContactSensor = env.scene[sensor_name]
+  is_contact = sensor.data.current_contact_time > 0
+  global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
+  offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(
+    1, -1
+  )
+  leg_phase = (global_phase + offsets) % 1.0
+  is_stance = leg_phase < threshold
+  reward = (is_stance == is_contact).float().mean(dim=1)
+  if command_name is not None:
+    command = env.command_manager.get_command(command_name)
+    if command is not None:
+      linear_norm = torch.norm(command[:, :2], dim=1)
+      angular_norm = torch.abs(command[:, 2])
+      total_command = linear_norm + angular_norm
+      scale = (total_command > command_threshold).float()
+      reward *= scale
+  return reward
 
 
 class feet_swing_height:
@@ -527,6 +521,9 @@ class variable_posture:
     command_name: str,
     walking_threshold: float = 0.5,
     running_threshold: float = 1.5,
+    recovery_std_scale: float = 4.0,
+    recovery_tilt_threshold: float = 0.18,
+    recovery_angular_velocity_threshold: float = 0.8,
   ) -> torch.Tensor:
     del std_standing, std_walking, std_running  # Unused.
 
@@ -550,6 +547,19 @@ class variable_posture:
       + self.std_running * running_mask.unsqueeze(1)
     )
 
+    tilt = torch.linalg.vector_norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+    angular_velocity = torch.linalg.vector_norm(
+      asset.data.root_link_ang_vel_b[:, :2], dim=-1
+    )
+    recovering = (standing_mask > 0.0) & (
+      (tilt > recovery_tilt_threshold)
+      | (angular_velocity > recovery_angular_velocity_threshold)
+    )
+    recovery_std = torch.maximum(
+      self.std_standing * recovery_std_scale, self.std_walking
+    )
+    std = torch.where(recovering.unsqueeze(-1), recovery_std, std)
+
     current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
     desired_joint_pos = self.default_joint_pos[:, asset_cfg.joint_ids]
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
@@ -558,20 +568,98 @@ class variable_posture:
 
 
 def stand_still(
-        env: ManagerBasedRlEnv,
-        command_name: str,
-        command_threshold: float = 0.1,
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.1,
+  unstable_scale: float = 0.05,
+  tilt_threshold: float = 0.18,
+  angular_velocity_threshold: float = 0.8,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    asset: Entity = env.scene[asset_cfg.name]
-    diff_angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
-    reward = torch.sum(torch.square(diff_angle), dim=1)
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            linear_norm = torch.norm(command[:, :2], dim=1)
-            angular_norm = torch.abs(command[:, 2])
-            total_command = linear_norm + angular_norm
-            scale = (total_command <= command_threshold).float()
-            reward *= scale
-    return reward
+  """Penalize standing-pose error without blocking emergency stepping."""
+  asset: Entity = env.scene[asset_cfg.name]
+  diff_angle = (
+    asset.data.joint_pos[:, asset_cfg.joint_ids]
+    - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+  )
+  cost = torch.sum(torch.square(diff_angle), dim=1)
+  command = env.command_manager.get_command(command_name)
+  if command is None:
+    return cost
+
+  linear_norm = torch.norm(command[:, :2], dim=1)
+  angular_norm = torch.abs(command[:, 2])
+  standing = (linear_norm + angular_norm) <= command_threshold
+  tilt = torch.linalg.vector_norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+  angular_velocity = torch.linalg.vector_norm(
+    asset.data.root_link_ang_vel_b[:, :2], dim=-1
+  )
+  unstable = (tilt > tilt_threshold) | (angular_velocity > angular_velocity_threshold)
+  stability_scale = torch.where(
+    unstable,
+    torch.full_like(cost, unstable_scale),
+    torch.ones_like(cost),
+  )
+  return cost * standing.float() * stability_scale
+
+
+def stand_stability_reward(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.1,
+  tilt_std: float = 0.15,
+  angular_velocity_std: float = 0.6,
+  linear_velocity_std: float = 0.25,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward quiet upright standing while still permitting recovery steps."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  if command is None:
+    return torch.zeros(env.num_envs, device=env.device)
+  total_command = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+  standing = (total_command <= command_threshold).float()
+  tilt_error = (
+    torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=-1) / tilt_std**2
+  )
+  angular_error = (
+    torch.sum(torch.square(asset.data.root_link_ang_vel_b), dim=-1)
+    / angular_velocity_std**2
+  )
+  linear_error = (
+    torch.sum(torch.square(asset.data.root_link_lin_vel_b[:, :2]), dim=-1)
+    / linear_velocity_std**2
+  )
+  stability = (
+    1.0 / (1.0 + tilt_error) + 1.0 / (1.0 + angular_error) + 1.0 / (1.0 + linear_error)
+  ) / 3.0
+  return standing * stability
+
+
+def stand_stability_gated_action_rate_l2(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.1,
+  unstable_scale: float = 0.1,
+  tilt_threshold: float = 0.18,
+  angular_velocity_threshold: float = 0.8,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Permit fast action changes for emergency steps while stopped."""
+  asset: Entity = env.scene[asset_cfg.name]
+  penalty = torch.sum(
+    torch.square(env.action_manager.action - env.action_manager.prev_action), dim=-1
+  )
+  command = env.command_manager.get_command(command_name)
+  if command is None:
+    return penalty
+  total_command = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+  standing = total_command <= command_threshold
+  tilt = torch.linalg.vector_norm(asset.data.projected_gravity_b[:, :2], dim=-1)
+  angular_velocity = torch.linalg.vector_norm(
+    asset.data.root_link_ang_vel_b[:, :2], dim=-1
+  )
+  recovering = standing & (
+    (tilt > tilt_threshold) | (angular_velocity > angular_velocity_threshold)
+  )
+  return torch.where(recovering, unstable_scale * penalty, penalty)

@@ -181,7 +181,11 @@ class JointPoseLibraryCommand(CommandTerm):
         "The controlled joints must resolve in the same order as `joint_names`."
       )
 
-    self.pose_targets, self.sampling_weights = self._load_pose_library()
+    (
+      self.pose_targets,
+      self.sampling_weights,
+      self.pose_is_raised,
+    ) = self._load_pose_library()
     self.pose_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.pose_command = torch.zeros(
       self.num_envs,
@@ -197,13 +201,19 @@ class JointPoseLibraryCommand(CommandTerm):
   def command(self) -> torch.Tensor:
     return self.pose_command
 
-  def _load_pose_library(self) -> tuple[torch.Tensor, torch.Tensor]:
+  @property
+  def is_raised(self) -> torch.Tensor:
+    return self.pose_is_raised[self.pose_ids]
+
+  def _load_pose_library(
+    self,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     path = Path(self.cfg.pose_file)
     if not path.is_file():
       raise FileNotFoundError(f"Joint pose library not found: {path}")
 
     with np.load(path, allow_pickle=False) as data:
-      required = {"joint_names", "poses", "sampling_weights"}
+      required = {"joint_names", "poses", "sampling_weights", "is_raised"}
       missing = required - set(data.files)
       if missing:
         raise KeyError(
@@ -212,6 +222,7 @@ class JointPoseLibraryCommand(CommandTerm):
       library_joint_names = tuple(str(name) for name in data["joint_names"])
       poses = np.asarray(data["poses"], dtype=np.float32)
       sampling_weights = np.asarray(data["sampling_weights"], dtype=np.float32)
+      is_raised = np.asarray(data["is_raised"], dtype=np.bool_)
 
     if library_joint_names != self.cfg.joint_names:
       raise ValueError(
@@ -232,6 +243,11 @@ class JointPoseLibraryCommand(CommandTerm):
         f"`sampling_weights` in {path} must have shape ({poses.shape[0]},), "
         f"got {sampling_weights.shape}."
       )
+    if is_raised.shape != (poses.shape[0],):
+      raise ValueError(
+        f"`is_raised` in {path} must have shape ({poses.shape[0]},), "
+        f"got {is_raised.shape}."
+      )
     if not np.all(np.isfinite(poses)):
       raise ValueError(f"Joint pose library contains non-finite poses: {path}")
     if (
@@ -246,6 +262,7 @@ class JointPoseLibraryCommand(CommandTerm):
     return (
       torch.as_tensor(poses, dtype=torch.float32, device=self.device),
       torch.as_tensor(sampling_weights, dtype=torch.float32, device=self.device),
+      torch.as_tensor(is_raised, dtype=torch.bool, device=self.device),
     )
 
   def _update_metrics(self) -> None:

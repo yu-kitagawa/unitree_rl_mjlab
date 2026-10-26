@@ -2,12 +2,17 @@
 
 from src.assets.robots import (
   G1_ACTION_SCALE,
+  G1_ARM_JOINT_NAMES,
+  G1_JOINT_NAMES,
   get_g1_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
+from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
+from src.tasks.tracking import mdp
 from src.tasks.tracking.mdp import MotionCommandCfg
 
 from src.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
@@ -44,7 +49,10 @@ def unitree_g1_flat_tracking_env_cfg(
     num_slots=1,
     history_length=4,
   )
-  cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg,)
+  cfg.scene.sensors = (
+    feet_ground_cfg,
+    self_collision_cfg,
+  )
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -74,6 +82,32 @@ def unitree_g1_flat_tracking_env_cfg(
     "asset_cfg"
   ].geom_names = r"^(left|right)_foot[1-7]_collision$"
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
+
+  lower_body_joint_names = tuple(
+    name for name in G1_JOINT_NAMES if name not in G1_ARM_JOINT_NAMES
+  )
+  cfg.rewards["hold_arm_pose"] = RewardTermCfg(
+    func=mdp.hold_joint_pose_error_exp,
+    weight=2.0,
+    params={
+      "command_name": "motion",
+      "std": 0.15,
+      "asset_cfg": SceneEntityCfg(
+        "robot", joint_names=G1_ARM_JOINT_NAMES, preserve_order=True
+      ),
+    },
+  )
+  cfg.rewards["hold_lower_body_joint_velocity"] = RewardTermCfg(
+    func=mdp.hold_joint_velocity_l2,
+    weight=-2.5e-3,
+    params={
+      "command_name": "motion",
+      "unstable_scale": 0.05,
+      "asset_cfg": SceneEntityCfg(
+        "robot", joint_names=lower_body_joint_names, preserve_order=True
+      ),
+    },
+  )
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
     "left_ankle_roll_link",
@@ -110,5 +144,8 @@ def unitree_g1_flat_tracking_env_cfg(
     motion_cmd.velocity_range = {}
 
     motion_cmd.sampling_mode = "start"
+    # Mirror OnlineMimic, which keeps the final reference until another mode
+    # or motion is requested.
+    motion_cmd.end_hold_duration_range = (1.0e9, 1.0e9)
 
   return cfg

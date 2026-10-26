@@ -93,6 +93,11 @@ Replace `--motion-files` with `/tmp/policy_input.npz` to train with the newly
 converted TaskPromptRL motion. A directory may also be specified to train with
 all NPZ files directly inside it.
 
+During training, each reference now keeps its final frame for a randomized
+2--5 seconds with zero reference velocity. Pushes remain active in that interval,
+and the hold rewards keep the arms on the final pose while allowing the lower
+body to step when the torso tilt or angular velocity indicates loss of balance.
+
 Available tasks:
 
   - Unitree-G1-Tracking-No-State-Estimation

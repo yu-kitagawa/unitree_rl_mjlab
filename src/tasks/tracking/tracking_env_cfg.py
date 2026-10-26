@@ -21,7 +21,6 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.tasks.tracking import mdp
 from src.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
@@ -161,6 +160,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       },
       velocity_range=VELOCITY_RANGE,
       joint_position_range=(-0.1, 0.1),
+      end_hold_duration_range=(2.0, 5.0),
       # Override in robot cfg.
       motion_files=[],
       anchor_body_name="",
@@ -234,7 +234,11 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "motion_global_root_pos": RewardTermCfg(
       func=mdp.motion_global_anchor_position_error_exp,
       weight=0.5,
-      params={"command_name": "motion", "std": 0.3},
+      params={
+        "command_name": "motion",
+        "std": 0.3,
+        "hold_unstable_scale": 0.15,
+      },
     ),
     "motion_global_root_ori": RewardTermCfg(
       func=mdp.motion_global_anchor_orientation_error_exp,
@@ -244,12 +248,20 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "motion_body_pos": RewardTermCfg(
       func=mdp.motion_relative_body_position_error_exp,
       weight=3.0,
-      params={"command_name": "motion", "std": 0.15},
+      params={
+        "command_name": "motion",
+        "std": 0.15,
+        "hold_unstable_scale": 0.2,
+      },
     ),
     "motion_body_ori": RewardTermCfg(
       func=mdp.motion_relative_body_orientation_error_exp,
       weight=2.0,
-      params={"command_name": "motion", "std": 0.2},
+      params={
+        "command_name": "motion",
+        "std": 0.2,
+        "hold_unstable_scale": 0.2,
+      },
     ),
     "motion_body_lin_vel": RewardTermCfg(
       func=mdp.motion_global_body_linear_velocity_error_exp,
@@ -269,7 +281,7 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "foot_slip": RewardTermCfg(
       func=mdp.foot_slip_penalty,
       weight=-0.25,
-      params={"command_name": "motion"},
+      params={"command_name": "motion", "hold_unstable_scale": 0.05},
     ),
     "feet_gait": RewardTermCfg(
       func=mdp.foot_contact_reward,
@@ -281,7 +293,16 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
       weight=-1e-3,
       params={"command_name": "motion"},
     ),
-    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-1e-1),
+    "hold_stability": RewardTermCfg(
+      func=mdp.hold_stability_reward,
+      weight=2.0,
+      params={"command_name": "motion"},
+    ),
+    "action_rate_l2": RewardTermCfg(
+      func=mdp.stability_gated_action_rate_l2,
+      weight=-1e-1,
+      params={"command_name": "motion", "unstable_scale": 0.1},
+    ),
     "joint_limit": RewardTermCfg(
       func=mdp.joint_pos_limits,
       weight=-10.0,
@@ -302,21 +323,21 @@ def make_tracking_env_cfg() -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
     "anchor_pos": TerminationTermCfg(
       func=mdp.bad_anchor_pos_z_only,
-      params={"command_name": "motion", "threshold": 0.25},
+      params={"command_name": "motion", "threshold": 0.35},
     ),
     "anchor_ori": TerminationTermCfg(
       func=mdp.bad_anchor_ori,
       params={
         "asset_cfg": SceneEntityCfg("robot"),
         "command_name": "motion",
-        "threshold": 0.8,
+        "threshold": 1.0,
       },
     ),
     "ee_body_pos": TerminationTermCfg(
       func=mdp.bad_motion_body_pos_z_only,
       params={
         "command_name": "motion",
-        "threshold": 0.25,
+        "threshold": 0.35,
         "body_names": (),  # Set per-robot.
       },
     ),

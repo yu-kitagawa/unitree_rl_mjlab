@@ -76,6 +76,19 @@ def _add_episode_arm_pose_task(cfg: ManagerBasedRlEnvCfg) -> None:
       "asset_cfg": arm_asset_cfg,
     },
   )
+  cfg.events["arm_payload"] = EventTermCfg(
+    func=mdp.apply_joint_pose_body_load,
+    mode="step",
+    params={
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_wrist_yaw_link", "right_wrist_yaw_link"),
+      ),
+      "command_name": "arm_pose",
+      # Sample each wrist independently: up to roughly 2 kg total payload.
+      "force_magnitude": (0.0, 9.81),
+    },
+  )
 
   # The generic posture rewards target the default arm pose, so limit them to
   # the lower body and waist and let the arm command own the arm joints.

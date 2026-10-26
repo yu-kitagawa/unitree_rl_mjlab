@@ -187,10 +187,10 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
   commands: dict[str, CommandTermCfg] = {
     "twist": TrajectoryCommandCfg(
       entity_name="robot",
-      resampling_time_range=(4.0, 4.0),
+      resampling_time_range=(6.0, 6.0),
       reference_times=(1.0, 2.0),
       motion_duration=3.0,
-      stop_hold_duration=1.0,
+      stop_hold_duration=3.0,
       start_ramp_duration=0.8,
       stop_ramp_duration=0.8,
       num_segments_range=(1, 3),
@@ -199,11 +199,13 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
       straight_probability=0.05,
       curvature_exponent=1.0,
       se2_speed_range=(0.20, 0.70),
+      reverse_probability=0.25,
+      reverse_speed_range=(0.10, 0.35),
       characteristic_length=0.45,
       tracking_gain=3.0,
       max_linear_speed=1.0,
       max_angular_speed=1.6,
-      rel_standing_envs=0.1,
+      rel_standing_envs=0.25,
       localization_noise_enabled=True,
       localization_position_noise_std=0.01,
       localization_outlier_probability=0.01,
@@ -242,7 +244,7 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
     "push_robot": EventTermCfg(
       func=mdp.push_by_setting_velocity,
       mode="interval",
-      interval_range_s=(5.0, 6.0),
+      interval_range_s=(3.0, 5.0),
       params={
         "velocity_range": {
           "x": (-0.5, 0.5),
@@ -342,7 +344,15 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
     "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0),
     "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
     "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-10.0),
-    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.05),
+    "action_rate_l2": RewardTermCfg(
+      func=mdp.stand_stability_gated_action_rate_l2,
+      weight=-0.05,
+      params={
+        "command_name": "twist",
+        "command_threshold": 0.1,
+        "unstable_scale": 0.1,
+      },
+    ),
     "foot_gait": RewardTermCfg(
       func=mdp.feet_gait,
       weight=0.5,
@@ -353,7 +363,7 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
         "command_threshold": 0.1,
         "command_name": "twist",
         "sensor_name": "feet_ground_contact",
-      }
+      },
     ),
     "foot_clearance": RewardTermCfg(
       func=mdp.feet_clearance,
@@ -390,8 +400,14 @@ def make_navigation_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "command_name": "twist",
         "command_threshold": 0.1,
+        "unstable_scale": 0.05,
         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
       },
+    ),
+    "stand_stability": RewardTermCfg(
+      func=mdp.stand_stability_reward,
+      weight=1.5,
+      params={"command_name": "twist", "command_threshold": 0.1},
     ),
   }
 

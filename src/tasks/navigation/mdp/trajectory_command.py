@@ -85,6 +85,9 @@ class TrajectoryCommand(CommandTerm):
     self.is_standing_env = torch.zeros(
       self.num_envs, dtype=torch.bool, device=self.device
     )
+    self.is_reverse_env = torch.zeros(
+      self.num_envs, dtype=torch.bool, device=self.device
+    )
 
     self.localization_position_noise_w = torch.zeros(
       self.num_envs, 2, device=self.device
@@ -93,9 +96,7 @@ class TrajectoryCommand(CommandTerm):
       self.num_envs, dtype=torch.bool, device=self.device
     )
 
-    self.previous_closest_progress = torch.zeros(
-      self.num_envs, device=self.device
-    )
+    self.previous_closest_progress = torch.zeros(self.num_envs, device=self.device)
     self.closest_progress = torch.zeros(self.num_envs, device=self.device)
     self.step_progress = torch.zeros(self.num_envs, device=self.device)
     self.closest_pos_w = torch.zeros(self.num_envs, 2, device=self.device)
@@ -103,15 +104,9 @@ class TrajectoryCommand(CommandTerm):
     self.distance_to_path = torch.zeros(self.num_envs, device=self.device)
     self.path_heading_error = torch.zeros(self.num_envs, device=self.device)
 
-    self.metrics["path_progress"] = torch.zeros(
-      self.num_envs, device=self.device
-    )
-    self.metrics["distance_to_path"] = torch.zeros(
-      self.num_envs, device=self.device
-    )
-    self.metrics["path_heading_error"] = torch.zeros(
-      self.num_envs, device=self.device
-    )
+    self.metrics["path_progress"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["distance_to_path"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["path_heading_error"] = torch.zeros(self.num_envs, device=self.device)
 
   @property
   def command(self) -> torch.Tensor:
@@ -129,9 +124,7 @@ class TrajectoryCommand(CommandTerm):
     return self._future_pose_b(use_localization_estimate=False)
 
   def _root_pose_from_qpos(self) -> tuple[torch.Tensor, torch.Tensor]:
-    root_pose = self.robot.data.data.qpos[
-      :, self.robot.data.indexing.free_joint_q_adr
-    ]
+    root_pose = self.robot.data.data.qpos[:, self.robot.data.indexing.free_joint_q_adr]
     root_pos_w = root_pose[:, :3]
     root_quat_w = root_pose[:, 3:7]
     forward_b = torch.zeros(self.num_envs, 3, device=self.device)
@@ -162,9 +155,7 @@ class TrajectoryCommand(CommandTerm):
     sin_yaw = torch.sin(root_heading_w).unsqueeze(-1)
     delta_x_b = cos_yaw * delta_w[:, :, 0] + sin_yaw * delta_w[:, :, 1]
     delta_y_b = -sin_yaw * delta_w[:, :, 0] + cos_yaw * delta_w[:, :, 1]
-    heading_error = wrap_to_pi(
-      future_poses_w[:, :, 2] - root_heading_w.unsqueeze(-1)
-    )
+    heading_error = wrap_to_pi(future_poses_w[:, :, 2] - root_heading_w.unsqueeze(-1))
     future_pose = torch.stack(
       (
         delta_x_b,
@@ -179,9 +170,7 @@ class TrajectoryCommand(CommandTerm):
   def _closest_trajectory_steps(self, positions_w: torch.Tensor) -> torch.Tensor:
     """Return the nearest sampled forward-path index for each position."""
     forward_path = self.trajectory_poses_w[:, : self.motion_steps + 1, :2]
-    distance_sq = torch.sum(
-      (forward_path - positions_w.unsqueeze(1)).square(), dim=-1
-    )
+    distance_sq = torch.sum((forward_path - positions_w.unsqueeze(1)).square(), dim=-1)
     return torch.argmin(distance_sq, dim=-1)
 
   def _sample_segment_steps(self, num_samples: int) -> torch.Tensor:
@@ -202,32 +191,29 @@ class TrajectoryCommand(CommandTerm):
         continue
       extra_steps = self.motion_steps - count * self.min_segment_steps
       if extra_steps == 0:
-        extras = torch.zeros(
-          sample_count, count, device=self.device, dtype=torch.long
-        )
+        extras = torch.zeros(sample_count, count, device=self.device, dtype=torch.long)
       else:
-        probabilities = torch.full(
-          (count,), 1.0 / count, device=self.device
+        probabilities = torch.full((count,), 1.0 / count, device=self.device)
+        extras = (
+          torch.distributions.Multinomial(total_count=extra_steps, probs=probabilities)
+          .sample((sample_count,))
+          .to(torch.long)
         )
-        extras = torch.distributions.Multinomial(
-          total_count=extra_steps, probs=probabilities
-        ).sample((sample_count,)).to(torch.long)
       segment_steps[mask, :count] = extras + self.min_segment_steps
     return segment_steps
 
   def _sample_curvatures(self, shape: tuple[int, int]) -> torch.Tensor:
-    magnitude = torch.rand(shape, device=self.device).pow(
-      self.cfg.curvature_exponent
-    ) / self.cfg.min_radius
+    magnitude = (
+      torch.rand(shape, device=self.device).pow(self.cfg.curvature_exponent)
+      / self.cfg.min_radius
+    )
     sign = torch.where(
       torch.rand(shape, device=self.device) < 0.5,
       -torch.ones_like(magnitude),
       torch.ones_like(magnitude),
     )
     curvature = sign * magnitude
-    straight = (
-      torch.rand(shape, device=self.device) < self.cfg.straight_probability
-    )
+    straight = torch.rand(shape, device=self.device) < self.cfg.straight_probability
     return torch.where(straight, torch.zeros_like(curvature), curvature)
 
   def _speed_scale(self, midpoint_time: torch.Tensor) -> torch.Tensor:
@@ -241,16 +227,13 @@ class TrajectoryCommand(CommandTerm):
     scale = torch.where(
       midpoint_time > stop_start,
       _smoothstep(
-        (self.cfg.motion_duration - midpoint_time)
-        / self.cfg.stop_ramp_duration
+        (self.cfg.motion_duration - midpoint_time) / self.cfg.stop_ramp_duration
       ),
       scale,
     )
     return scale
 
-  def _sample_localization_noise(
-    self, env_ids: torch.Tensor | None = None
-  ) -> None:
+  def _sample_localization_noise(self, env_ids: torch.Tensor | None = None) -> None:
     indices = slice(None) if env_ids is None else env_ids
     num_samples = self.num_envs if env_ids is None else len(env_ids)
     if not self.cfg.localization_noise_enabled:
@@ -275,32 +258,37 @@ class TrajectoryCommand(CommandTerm):
 
     standing = torch.rand(num_samples, device=self.device) < self.cfg.rel_standing_envs
     self.is_standing_env[env_ids] = standing
+    reverse = (
+      torch.rand(num_samples, device=self.device) < self.cfg.reverse_probability
+    ) & ~standing
+    self.is_reverse_env[env_ids] = reverse
     segment_steps = self._sample_segment_steps(num_samples)
     segment_ends = torch.cumsum(segment_steps, dim=-1)
-    curvatures = self._sample_curvatures(segment_steps.shape)
+    curvatures = self._sample_curvatures((num_samples, segment_steps.shape[1]))
     curvatures[segment_steps == 0] = 0.0
-    se2_speed = torch.empty(num_samples, device=self.device).uniform_(
+    forward_speed = torch.empty(num_samples, device=self.device).uniform_(
       *self.cfg.se2_speed_range
+    )
+    reverse_speed = torch.empty(num_samples, device=self.device).uniform_(
+      *self.cfg.reverse_speed_range
+    )
+    se2_speed = torch.where(reverse, reverse_speed, forward_speed)
+    travel_sign = torch.where(
+      reverse, -torch.ones_like(se2_speed), torch.ones_like(se2_speed)
     )
     se2_speed[standing] = 0.0
 
     local_poses = torch.zeros(
       num_samples, self.episode_steps + 1, 3, device=self.device
     )
-    progresses = torch.zeros(
-      num_samples, self.episode_steps + 1, device=self.device
-    )
-    linear_velocities = torch.zeros(
-      num_samples, self.episode_steps, device=self.device
-    )
+    progresses = torch.zeros(num_samples, self.episode_steps + 1, device=self.device)
+    linear_velocities = torch.zeros(num_samples, self.episode_steps, device=self.device)
     angular_velocities = torch.zeros_like(linear_velocities)
 
     for step in range(self.motion_steps):
       segment_index = torch.sum(step >= segment_ends, dim=-1)
       segment_index = torch.clamp(segment_index, max=curvatures.shape[1] - 1)
-      curvature = torch.gather(
-        curvatures, 1, segment_index.unsqueeze(-1)
-      ).squeeze(-1)
+      curvature = torch.gather(curvatures, 1, segment_index.unsqueeze(-1)).squeeze(-1)
       midpoint_time = torch.full(
         (num_samples,),
         (step + 0.5) * self._env.step_dt,
@@ -309,7 +297,7 @@ class TrajectoryCommand(CommandTerm):
       base_v = se2_speed / torch.sqrt(
         1.0 + (self.cfg.characteristic_length * curvature).square()
       )
-      linear_velocity = base_v * self._speed_scale(midpoint_time)
+      linear_velocity = travel_sign * base_v * self._speed_scale(midpoint_time)
       angular_velocity = curvature * linear_velocity
       linear_velocities[:, step] = linear_velocity
       angular_velocities[:, step] = angular_velocity
@@ -330,7 +318,10 @@ class TrajectoryCommand(CommandTerm):
         + cos_heading * local_delta[:, 1]
       )
       local_poses[:, step + 1, 2] = heading + local_delta[:, 2]
-      progresses[:, step + 1] = progresses[:, step] + ds
+      # Progress is traveled arc length, independent of whether the robot faces
+      # along or against the direction of travel. This keeps correct reverse
+      # motion positively rewarded.
+      progresses[:, step + 1] = progresses[:, step] + torch.abs(ds)
 
     local_poses[:, self.motion_steps + 1 :] = local_poses[
       :, self.motion_steps : self.motion_steps + 1
@@ -338,9 +329,9 @@ class TrajectoryCommand(CommandTerm):
     progresses[:, self.motion_steps + 1 :] = progresses[
       :, self.motion_steps : self.motion_steps + 1
     ]
-    accumulated_rotation = torch.sum(
-      torch.abs(angular_velocities), dim=-1
-    ) * self._env.step_dt
+    accumulated_rotation = (
+      torch.sum(torch.abs(angular_velocities), dim=-1) * self._env.step_dt
+    )
     if bool(torch.any(accumulated_rotation >= 2.0 * torch.pi).item()):
       raise ValueError("A sampled trajectory accumulates one or more full turns.")
 
@@ -364,9 +355,8 @@ class TrajectoryCommand(CommandTerm):
       -1.0, 0.0, self.motion_steps + 1, device=self.device
     )
     backward_progress = total_progress.unsqueeze(-1) * backward_ratio
-    backward_local = _arc_poses(
-      curvatures[:, :1], backward_progress
-    )
+    signed_backward_progress = backward_progress * travel_sign.unsqueeze(-1)
+    backward_local = _arc_poses(curvatures[:, :1], signed_backward_progress)
     backward_w = torch.empty_like(backward_local)
     backward_w[:, :, 0] = (
       anchor_pos_w[:, 0].unsqueeze(-1)
@@ -378,9 +368,7 @@ class TrajectoryCommand(CommandTerm):
       + sin_anchor * backward_local[:, :, 0]
       + cos_anchor * backward_local[:, :, 1]
     )
-    backward_w[:, :, 2] = (
-      anchor_heading_w.unsqueeze(-1) + backward_local[:, :, 2]
-    )
+    backward_w[:, :, 2] = anchor_heading_w.unsqueeze(-1) + backward_local[:, :, 2]
 
     self.trajectory_poses_w[env_ids] = poses_w
     self.trajectory_progresses[env_ids] = progresses
@@ -409,9 +397,7 @@ class TrajectoryCommand(CommandTerm):
     if env_ids is None:
       env_ids = torch.arange(self.num_envs, device=self.device)
     root_pos_w, root_heading_w = self._root_pose_from_qpos()
-    estimated_pos_w = (
-      root_pos_w[:, :2] + self.localization_position_noise_w
-    )
+    estimated_pos_w = root_pos_w[:, :2] + self.localization_position_noise_w
     estimated_step = self._closest_trajectory_steps(estimated_pos_w)
     ground_truth_step = self._closest_trajectory_steps(root_pos_w[:, :2])
     self.trajectory_step[env_ids] = estimated_step[env_ids]
@@ -435,9 +421,7 @@ class TrajectoryCommand(CommandTerm):
     reference_velocity_w = linear_velocity.unsqueeze(-1) * torch.stack(
       (torch.cos(reference_heading), torch.sin(reference_heading)), dim=-1
     )
-    velocity_w = (
-      reference_velocity_w + self.cfg.tracking_gain * position_error_w
-    )
+    velocity_w = reference_velocity_w + self.cfg.tracking_gain * position_error_w
     heading_error = wrap_to_pi(reference_heading - root_heading_w[env_ids])
     cos_heading = torch.cos(root_heading_w[env_ids])
     sin_heading = torch.sin(root_heading_w[env_ids])
@@ -447,9 +431,7 @@ class TrajectoryCommand(CommandTerm):
     self.vel_command_b[env_ids, 1] = (
       -sin_heading * velocity_w[:, 0] + cos_heading * velocity_w[:, 1]
     )
-    command_speed = torch.linalg.vector_norm(
-      self.vel_command_b[env_ids, :2], dim=-1
-    )
+    command_speed = torch.linalg.vector_norm(self.vel_command_b[env_ids, :2], dim=-1)
     speed_scale = torch.clamp(
       self.cfg.max_linear_speed / torch.clamp(command_speed, min=1.0e-6),
       max=1.0,
@@ -470,22 +452,18 @@ class TrajectoryCommand(CommandTerm):
     lengths_sq = torch.sum(vectors.square(), dim=-1)
     valid = lengths_sq > 1.0e-16
     safe_lengths_sq = torch.where(valid, lengths_sq, torch.ones_like(lengths_sq))
-    fractions = torch.sum(
-      (robot_pos.unsqueeze(1) - starts) * vectors, dim=-1
-    ) / safe_lengths_sq
+    fractions = (
+      torch.sum((robot_pos.unsqueeze(1) - starts) * vectors, dim=-1) / safe_lengths_sq
+    )
     fractions = torch.clamp(fractions, 0.0, 1.0)
     points = starts + fractions.unsqueeze(-1) * vectors
-    distance_sq = torch.sum(
-      (points - robot_pos.unsqueeze(1)).square(), dim=-1
-    )
+    distance_sq = torch.sum((points - robot_pos.unsqueeze(1)).square(), dim=-1)
     distance_sq = torch.where(
       valid, distance_sq, torch.full_like(distance_sq, torch.inf)
     )
 
     path_progress_delta = self.path_progresses[:, 1:] - self.path_progresses[:, :-1]
-    candidate_progress = (
-      self.path_progresses[:, :-1] + fractions * path_progress_delta
-    )
+    candidate_progress = self.path_progresses[:, :-1] + fractions * path_progress_delta
     min_distance_sq = torch.min(distance_sq, dim=-1, keepdim=True).values
     tied = valid & (distance_sq <= min_distance_sq + 1.0e-12)
     tie_distance = torch.abs(
@@ -533,9 +511,7 @@ class TrajectoryCommand(CommandTerm):
     self.distance_to_path.copy_(
       torch.linalg.vector_norm(robot_pos - closest_pos, dim=-1)
     )
-    self.path_heading_error.copy_(
-      wrap_to_pi(root_heading_w - closest_heading)
-    )
+    self.path_heading_error.copy_(wrap_to_pi(root_heading_w - closest_heading))
 
   def _update_metrics(self) -> None:
     normalization_steps = self._env.max_episode_length
@@ -620,6 +596,8 @@ class TrajectoryCommandCfg(CommandTermCfg):
   straight_probability: float = 0.05
   curvature_exponent: float = 1.0
   se2_speed_range: tuple[float, float] = (0.20, 0.70)
+  reverse_probability: float = 0.25
+  reverse_speed_range: tuple[float, float] = (0.10, 0.35)
   characteristic_length: float = 0.45
   tracking_gain: float = 3.0
   max_linear_speed: float = 1.0
@@ -678,6 +656,15 @@ class TrajectoryCommandCfg(CommandTermCfg):
       raise ValueError("se2_speed_range can exceed max_linear_speed.")
     if speed_max / self.characteristic_length > self.max_angular_speed:
       raise ValueError("se2_speed_range can exceed max_angular_speed.")
+    if not 0.0 <= self.reverse_probability <= 1.0:
+      raise ValueError("reverse_probability must be in [0, 1].")
+    reverse_speed_min, reverse_speed_max = self.reverse_speed_range
+    if not 0.0 < reverse_speed_min <= reverse_speed_max:
+      raise ValueError("reverse_speed_range must satisfy 0 < min <= max.")
+    if reverse_speed_max > self.max_linear_speed:
+      raise ValueError("reverse_speed_range can exceed max_linear_speed.")
+    if reverse_speed_max / self.characteristic_length > self.max_angular_speed:
+      raise ValueError("reverse_speed_range can exceed max_angular_speed.")
     if not 0.0 <= self.rel_standing_envs <= 1.0:
       raise ValueError("rel_standing_envs must be in [0, 1].")
     if self.localization_position_noise_std < 0.0:
@@ -688,9 +675,7 @@ class TrajectoryCommandCfg(CommandTermCfg):
       raise ValueError("localization_outlier_position_std must be non-negative.")
     resampling_matches_duration = np.isclose(
       self.resampling_time_range[0], self.episode_duration
-    ) and np.isclose(
-      self.resampling_time_range[1], self.episode_duration
-    )
+    ) and np.isclose(self.resampling_time_range[1], self.episode_duration)
     if not resampling_matches_duration:
       raise ValueError(
         "resampling_time_range must equal motion_duration + stop_hold_duration."
